@@ -5,13 +5,65 @@ extern crate self as rizz;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
-    use rizz::{connect, db, Error, Row, Table, Text, Value};
+    use rizz::{and, connect, db, eq, or, Error, Row, Table, Text, Value};
     use serde::Deserialize;
 
     type TestResult<T> = Result<T, Error>;
 
     #[tokio::test]
-    async fn it_works() -> TestResult<()> {
+    async fn insert_sql_works() -> TestResult<()> {
+        let conn = connect(":memory:").await?;
+        let db = db(conn);
+        let accounts = Accounts::default();
+
+        let sql = db
+            .insert(accounts)
+            .values(Account {
+                account_id: "1".into(),
+            })
+            .returning()
+            .sql();
+
+        assert_eq!(
+            sql,
+            "insert into accounts (account_id) values (?) returning *"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn select_where_and_or_like_sql_works() -> TestResult<()> {
+        let conn = connect(":memory:").await?;
+        let db = db(conn);
+        let accounts = Accounts::table();
+
+        let query = db.select().from(accounts).r#where(or(
+            and(
+                eq(accounts.account_id, "1"),
+                eq(accounts.account_id, "1".to_owned()),
+            ),
+            eq(accounts.account_id, 1),
+        ));
+
+        let sql = query.sql();
+        let params = query.values.unwrap();
+
+        assert_eq!(sql, "select * from accounts where ((accounts.account_id = ? and accounts.account_id = ?) or accounts.account_id = ?)");
+        assert_eq!(
+            params,
+            vec![
+                Value::Text("1".into()),
+                Value::Text("1".into()),
+                Value::Integer(1)
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insert_works() -> TestResult<()> {
         let conn = connect(":memory:").await?;
         let db = db(conn);
 
@@ -19,19 +71,8 @@ mod tests {
             .execute_batch("create table accounts (account_id)")
             .await?;
 
-        let accounts = Accounts::default();
-        let sql = db
-            .insert(accounts)
-            .values(Account {
-                account_id: "1".into(),
-            })
-            .returning()
-            .sql()?;
-        assert_eq!(
-            sql,
-            "insert into accounts (account_id) values (?) returning *"
-        );
-        let _inserted: Account = db
+        let accounts = Accounts::table();
+        let inserted: Account = db
             .insert(accounts)
             .values(Account {
                 account_id: "1".into(),
@@ -39,9 +80,8 @@ mod tests {
             .returning()
             .execute()
             .await?;
-        let rows: Vec<Account> = db.select().from(accounts).all().await?;
 
-        assert_eq!(rows.len(), 1);
+        assert_eq!(inserted.account_id, "1");
 
         Ok(())
     }
@@ -52,11 +92,11 @@ mod tests {
     }
 
     impl Row for Account {
-        fn column_names(&self) -> std::sync::Arc<str> {
-            "account_id".into()
+        fn column_names(&self) -> &'static str {
+            "accounts.account_id".into()
         }
 
-        fn insert_placeholders(&self) -> std::sync::Arc<str> {
+        fn insert_placeholders(&self) -> &'static str {
             "?".into()
         }
 
@@ -71,12 +111,18 @@ mod tests {
     }
 
     impl Table for Accounts {
-        fn table_name(&self) -> std::sync::Arc<str> {
-            "accounts".into()
+        fn table() -> Self {
+            Self {
+                account_id: "accounts.account_id",
+            }
         }
 
-        fn column_names(&self) -> std::sync::Arc<str> {
-            "account_id".into()
+        fn table_name(&self) -> &'static str {
+            "accounts"
+        }
+
+        fn column_names(&self) -> &'static str {
+            "account_id"
         }
     }
 }
@@ -350,73 +396,50 @@ impl Query {
         self
     }
 
-    // pub fn r#where(mut self, param: Value) -> Self {
-    //     format!("where {}", )
-    //     if let Some(ref mut r#where) = self.r#where {
-    //         r#where.push(bind);
-    //     } else {
-    //         self.r#where = Some(vec![bind]);
-    //     }
-    //     self
-    // }
+    pub fn r#where(mut self, part: WherePart) -> Self {
+        if let None = self.r#where {
+            self.r#where = Some(format!("where {}", part.clause).into())
+        }
+        match self.values {
+            Some(ref mut values) => values.extend(part.values),
+            None => self.values = Some(part.values),
+        }
 
-    pub fn limit(mut self, limit: u64) -> Self {
-        self.limit = Some(limit);
         self
     }
 
-    fn limit_sql(&self) -> Option<Arc<str>> {
-        match self.limit {
-            Some(lim) => Some(format!("limit {}", lim).into()),
-            None => None,
-        }
+    pub fn limit(mut self, limit: u64) -> Self {
+        self.limit = Some(format!("limit {}", limit).into());
+        self
     }
 
-    pub fn sql(&self) -> Result<String, Error> {
-        Ok(self.to_sql()?.to_string())
+    pub fn sql(&self) -> String {
+        self.to_sql().to_string()
     }
 
-    fn to_sql(&self) -> Result<Arc<str>, Error> {
-        let sql = vec![
+    fn to_sql(&self) -> Arc<str> {
+        vec![
             self.insert_into.clone(),
             self.placeholders.clone(),
             self.returning.clone(),
             self.select.clone(),
             self.from.clone(),
-            self.where_clause(),
-            self.limit_sql(),
+            self.r#where.clone(),
+            self.limit.clone(),
         ]
         .into_iter()
         .filter(|x| x.is_some())
         .map(|x| x.unwrap())
         .collect::<Vec<_>>()
         .join(" ")
-        .into();
-
-        Ok(sql)
-    }
-
-    fn where_clause(&self) -> Option<Arc<str>> {
-        // match self.r#where {
-        //     Some(ref r#where) => {
-        //         let clause = r#where
-        //             .iter()
-        //             .enumerate()
-        //             .map(|(i, bind)| format!("{} = ?{}", bind.column, i + 1))
-        //             .collect::<Vec<_>>()
-        //             .join(" and ");
-        //         Some(format!("where {}", clause).into())
-        //     }
-        //     None => None,
-        // }
-        None
+        .into()
     }
 
     pub async fn all<T: DeserializeOwned + Send + Sync + 'static>(self) -> Result<Vec<T>, Error>
     where
         T: Row,
     {
-        let sql = self.sql()?;
+        let sql = self.sql();
         let rows = rows(&self.connection, sql.into(), self.values).await?;
         Ok(rows)
     }
@@ -427,7 +450,7 @@ impl Query {
     where
         T: Row,
     {
-        let sql = self.sql()?;
+        let sql = self.sql();
         let prep = prepare::<T>(&self.connection, sql.into(), self.values).await?;
         Ok(prep)
     }
@@ -456,15 +479,14 @@ impl Query {
     }
 
     pub async fn execute<T: Row + DeserializeOwned + Send + Sync + 'static>(
-        mut self,
+        self,
     ) -> Result<T, Error> {
-        self.returning = Some("returning *".into());
-        let sql = self.to_sql()?;
+        let sql = self.to_sql();
         let rows = rows::<T>(&self.connection, sql.clone(), self.values).await?;
         if let Some(row) = rows.into_iter().nth(0) {
             Ok(row)
         } else {
-            Err(Error::InsertError(sql.to_string()))
+            Err(Error::InsertError(format!("failed to insert {}", sql)))
         }
     }
 }
@@ -499,7 +521,7 @@ pub struct Query {
     select: Option<Arc<str>>,
     from: Option<Arc<str>>,
     r#where: Option<Arc<str>>,
-    limit: Option<u64>,
+    limit: Option<Arc<str>>,
     insert_into: Option<Arc<str>>,
     placeholders: Option<Arc<str>>,
     returning: Option<Arc<str>>,
@@ -512,15 +534,15 @@ pub type Integer = &'static str;
 pub type Real = &'static str;
 
 #[derive(Default)]
-pub struct All;
+pub struct Star;
 
-impl Row for All {
-    fn column_names(&self) -> std::sync::Arc<str> {
-        "*".into()
+impl Row for Star {
+    fn column_names(&self) -> &'static str {
+        "*"
     }
 
-    fn insert_placeholders(&self) -> std::sync::Arc<str> {
-        "".into()
+    fn insert_placeholders(&self) -> &'static str {
+        ""
     }
 
     fn insert_values(&self) -> Vec<Value> {
@@ -528,11 +550,45 @@ impl Row for All {
     }
 }
 
-pub fn star() -> All {
-    All::default()
+pub fn star() -> Star {
+    Star::default()
 }
 
-#[derive(Clone, Debug)]
+pub fn and(left: WherePart, right: WherePart) -> WherePart {
+    let mut values: Vec<Value> = vec![];
+    values.extend(left.values);
+    values.extend(right.values);
+
+    WherePart {
+        clause: format!("({} and {})", left.clause, right.clause),
+        values,
+    }
+}
+
+pub fn or(left: WherePart, right: WherePart) -> WherePart {
+    let mut values: Vec<Value> = vec![];
+    values.extend(left.values);
+    values.extend(right.values);
+
+    WherePart {
+        clause: format!("({} or {})", left.clause, right.clause),
+        values,
+    }
+}
+
+pub struct WherePart {
+    clause: String,
+    values: Vec<Value>,
+}
+
+pub fn eq(left: &'static str, right: impl Into<Value>) -> WherePart {
+    WherePart {
+        clause: format!("{} = ?", left),
+        values: vec![right.into()],
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Text(std::sync::Arc<str>),
     Blob(Vec<u8>),
@@ -542,6 +598,12 @@ pub enum Value {
 
 impl From<String> for Value {
     fn from(value: String) -> Self {
+        Value::Text(value.into())
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
         Value::Text(value.into())
     }
 }
@@ -571,15 +633,16 @@ impl From<Vec<u8>> for Value {
 }
 
 pub trait Row {
-    fn column_names(&self) -> std::sync::Arc<str>;
-    fn insert_placeholders(&self) -> std::sync::Arc<str>;
+    fn column_names(&self) -> &'static str;
+    fn insert_placeholders(&self) -> &'static str;
     fn insert_values(&self) -> Vec<Value>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub trait Table {
-    fn table_name(&self) -> std::sync::Arc<str>;
-    fn column_names(&self) -> std::sync::Arc<str>;
+    fn table() -> Self;
+    fn table_name(&self) -> &'static str;
+    fn column_names(&self) -> &'static str;
 }
 
 #[derive(thiserror::Error, Debug)]
