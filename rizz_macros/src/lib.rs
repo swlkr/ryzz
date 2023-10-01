@@ -54,6 +54,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         })
         .collect::<Vec<_>>();
     let insert_sql = format!("insert into {} ({})", table_name, column_names);
+    let update_sql = format!("update {}", table_name);
 
     Ok(quote! {
         impl rizz::Table for #struct_name {
@@ -73,6 +74,10 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
 
             fn insert_sql(&self) -> &'static str {
                 #insert_sql
+            }
+
+            fn update_sql(&self) -> &'static str {
+                #update_sql
             }
         }
     })
@@ -109,7 +114,7 @@ fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
         .join(",");
     let insert_sql = col_idents.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let insert_sql = format!("values ({})", insert_sql);
-    let insert_values = col_idents
+    let values = col_idents
         .iter()
         .map(|ident| {
             quote! {
@@ -117,18 +122,28 @@ fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
             }
         })
         .collect::<Vec<_>>();
+    let set_sql = col_idents
+        .iter()
+        .map(|ident| format!("{} = ?", ident.to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let set_sql = format!("set {}", set_sql);
     Ok(quote! {
         impl rizz::Row for #struct_name {
             fn column_names(&self) -> &'static str {
                 #column_names
             }
 
-            fn insert_values(&self) -> Vec<Value> {
-                vec![#(#insert_values,)*]
+            fn values(&self) -> Vec<Value> {
+                vec![#(#values,)*]
             }
 
             fn insert_sql(&self) -> &'static str {
                 #insert_sql
+            }
+
+            fn set_sql(&self) -> &'static str {
+                #set_sql
             }
         }
     })

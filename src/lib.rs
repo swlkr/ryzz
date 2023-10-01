@@ -7,8 +7,10 @@ pub use rizz_macros::{Row, Table};
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
-    use rizz::{and, connect, db, eq, or, Database, Error, Row, Table, Text, Value};
+    use rizz::{and, connect, db, eq, or, Database, Error, Row, Table, Value};
     use serde::Deserialize;
+
+    use crate::Integer;
 
     type TestResult<T> = Result<T, Error>;
 
@@ -20,43 +22,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_sql_works() -> TestResult<()> {
-        let db = test_db().await?;
-        let accounts = Accounts::new();
-
-        let sql = db
-            .insert(accounts)
-            .values(Account {
-                account_id: "1".into(),
-            })
-            .returning()
-            .sql();
-
-        assert_eq!(
-            sql,
-            "insert into accounts (account_id) values (?) returning *"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn select_where_and_or_like_sql_works() -> TestResult<()> {
         let db = test_db().await?;
         let accounts = Accounts::new();
 
         let query = db.select().from(accounts).r#where(or(
-            and(
-                eq(accounts.account_id, "1"),
-                eq(accounts.account_id, "1".to_owned()),
-            ),
-            eq(accounts.account_id, 1),
+            and(eq(accounts.id, "1"), eq(accounts.id, "1".to_owned())),
+            eq(accounts.id, 1),
         ));
 
         let sql = query.sql();
         let params = query.values.unwrap();
 
-        assert_eq!(sql, "select * from accounts where ((accounts.account_id = ? and accounts.account_id = ?) or accounts.account_id = ?)");
+        assert_eq!(
+            sql,
+            "select * from accounts where ((accounts.id = ? and accounts.id = ?) or accounts.id = ?)"
+        );
         assert_eq!(
             params,
             vec![
@@ -70,38 +51,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_works() -> TestResult<()> {
+    async fn crud_works() -> TestResult<()> {
         let db = test_db().await?;
 
-        let _ = db
-            .execute_batch("create table accounts (account_id)")
-            .await?;
+        let _ = db.execute_batch("create table accounts (id)").await?;
 
         let accounts = Accounts::new();
         let inserted: Account = db
             .insert(accounts)
-            .values(Account {
-                account_id: "1".into(),
-            })
+            .values(Account { id: 1 })
             .returning()
             .execute()
             .await?;
 
-        assert_eq!(inserted.account_id, "1");
+        assert_eq!(inserted.id, 1);
+
+        let new_account = Account { id: 2 };
+        let updated: Account = db
+            .update(accounts)
+            .set(new_account)
+            .r#where(eq(accounts.id, 1))
+            .returning()
+            .execute()
+            .await?;
+
+        assert_eq!(updated.id, 2);
 
         Ok(())
     }
 
     #[derive(Row, Deserialize)]
     struct Account {
-        account_id: String,
+        id: i64,
     }
 
     #[derive(Table, Clone, Copy)]
     #[rizz(table = "accounts")]
     struct Accounts {
         #[rizz(primary_key)]
-        account_id: Text,
+        id: Integer,
     }
 }
 
@@ -247,6 +235,10 @@ impl Database {
         Query::new(self.connection.clone()).insert(table)
     }
 
+    pub fn update(&self, table: impl Table) -> Query {
+        Query::new(self.connection.clone()).update(table)
+    }
+
     pub async fn execute_batch(&self, sql: &str) -> Result<(), Error> {
         let sql = sql.to_owned();
         let _ = self
@@ -358,6 +350,8 @@ impl Query {
             insert_into: None,
             values_sql: None,
             values: None,
+            set: None,
+            update: None,
             returning: None,
         }
     }
@@ -397,12 +391,14 @@ impl Query {
 
     fn to_sql(&self) -> Arc<str> {
         vec![
-            self.insert_into.clone(),
-            self.values_sql.clone(),
-            self.returning.clone(),
             self.select.clone(),
             self.from.clone(),
+            self.insert_into.clone(),
+            self.values_sql.clone(),
+            self.update.clone(),
+            self.set.clone(),
             self.r#where.clone(),
+            self.returning.clone(),
             self.limit.clone(),
         ]
         .into_iter()
@@ -440,12 +436,23 @@ impl Query {
 
     pub fn values(mut self, row: impl Row) -> Self {
         self.values_sql = Some(row.insert_sql().into());
-        self.values = Some(row.insert_values());
+        self.values = Some(row.values());
+        self
+    }
+
+    pub fn update(mut self, table: impl Table) -> Self {
+        self.update = Some(table.update_sql().into());
         self
     }
 
     pub fn returning(mut self) -> Self {
         self.returning = Some("returning *".into());
+        self
+    }
+
+    pub fn set(mut self, row: impl Row) -> Self {
+        self.set = Some(row.set_sql().into());
+        self.values = Some(row.values());
         self
     }
 
@@ -494,9 +501,11 @@ pub struct Query {
     r#where: Option<Arc<str>>,
     limit: Option<Arc<str>>,
     insert_into: Option<Arc<str>>,
+    set: Option<Arc<str>>,
     values_sql: Option<Arc<str>>,
     returning: Option<Arc<str>>,
     values: Option<Vec<Value>>,
+    update: Option<Arc<str>>,
 }
 
 pub type Text = &'static str;
@@ -512,11 +521,15 @@ impl Row for Star {
         "*"
     }
 
-    fn insert_values(&self) -> Vec<Value> {
+    fn values(&self) -> Vec<Value> {
         vec![]
     }
 
     fn insert_sql(&self) -> &'static str {
+        ""
+    }
+
+    fn set_sql(&self) -> &'static str {
         ""
     }
 }
@@ -605,8 +618,9 @@ impl From<Vec<u8>> for Value {
 
 pub trait Row {
     fn column_names(&self) -> &'static str;
-    fn insert_values(&self) -> Vec<Value>;
+    fn values(&self) -> Vec<Value>;
     fn insert_sql(&self) -> &'static str;
+    fn set_sql(&self) -> &'static str;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -615,6 +629,7 @@ pub trait Table {
     fn table_name(&self) -> &'static str;
     fn column_names(&self) -> &'static str;
     fn insert_sql(&self) -> &'static str;
+    fn update_sql(&self) -> &'static str;
 }
 
 #[derive(thiserror::Error, Debug)]
