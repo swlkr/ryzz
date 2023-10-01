@@ -162,6 +162,13 @@ impl Database {
             .await?;
         Ok(())
     }
+
+    pub async fn query<T: DeserializeOwned + Send + 'static>(
+        &self,
+        sql: Sql,
+    ) -> Result<Vec<T>, Error> {
+        rows::<T>(&self.connection, sql).await
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -200,25 +207,15 @@ impl Value {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn execute(
-    connection: &tokio_rusqlite::Connection,
-    sql: Arc<str>,
-    binds: Option<Vec<Value>>,
-) -> Result<usize, Error> {
+async fn execute(connection: &tokio_rusqlite::Connection, sql: Sql) -> Result<usize, Error> {
     let results = connection
         .call(move |conn| {
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows_affected = match binds {
-                Some(values) => {
-                    let params = values
-                        .iter()
-                        .map(|value| value.to_sql())
-                        .collect::<Vec<_>>();
-                    stmt.execute(&*params)?
-                }
-                None => stmt.execute([])?,
-            };
-            Ok(rows_affected)
+            let params = sql
+                .params
+                .iter()
+                .map(|value| value.to_sql())
+                .collect::<Vec<_>>();
+            conn.prepare_cached(&sql.clause)?.execute(&*params)
         })
         .await?;
 
@@ -226,24 +223,19 @@ async fn execute(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn rows<T: DeserializeOwned + Send + Sync + 'static>(
+async fn rows<T: DeserializeOwned + Send + 'static>(
     connection: &tokio_rusqlite::Connection,
-    sql: Arc<str>,
-    binds: Option<Vec<Value>>,
+    sql: Sql,
 ) -> Result<Vec<T>, Error> {
     let results = connection
         .call(move |conn| {
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = match binds {
-                Some(values) => {
-                    let params = values
-                        .iter()
-                        .map(|value| value.to_sql())
-                        .collect::<Vec<_>>();
-                    stmt.query(&*params)?
-                }
-                None => stmt.query([])?,
-            };
+            let params = sql
+                .params
+                .iter()
+                .map(|value| value.to_sql())
+                .collect::<Vec<_>>();
+            let mut stmt = conn.prepare_cached(&sql.clause)?;
+            let rows = stmt.query(&*params)?;
             let rows: Vec<T> = serde_rusqlite::from_rows::<T>(rows)
                 .into_iter()
                 .filter(|x| x.is_ok())
@@ -259,8 +251,7 @@ async fn rows<T: DeserializeOwned + Send + Sync + 'static>(
 #[cfg(not(target_arch = "wasm32"))]
 async fn prepare<T: DeserializeOwned + Send + Sync + 'static>(
     connection: &tokio_rusqlite::Connection,
-    sql: Arc<str>,
-    binds: Option<Vec<Value>>,
+    sql: Sql,
 ) -> Result<Prep<T>, Error> {
     let cloned = connection.clone();
     let prep = connection
@@ -268,11 +259,10 @@ async fn prepare<T: DeserializeOwned + Send + Sync + 'static>(
             // this uses an internal Lru cache within rusqlite
             // and uses the sql as the key to the cache
             // not ideal but what can you do?
-            let _ = conn.prepare_cached(&sql)?;
+            let _ = conn.prepare_cached(&sql.clause)?;
             Ok(Prep {
                 connection: cloned,
-                sql: sql.into(),
-                params: binds,
+                sql,
                 phantom: PhantomData::default(),
             })
         })
@@ -291,7 +281,7 @@ impl Query {
             limit: None,
             insert_into: None,
             values_sql: None,
-            values: None,
+            values: vec![],
             delete: None,
             set: None,
             update: None,
@@ -311,15 +301,11 @@ impl Query {
         self
     }
 
-    pub fn r#where(mut self, part: WherePart) -> Self {
+    pub fn r#where(mut self, sql: Sql) -> Self {
         if let None = self.r#where {
-            self.r#where = Some(format!("where {}", part.clause).into())
+            self.r#where = Some(format!("where {}", sql.clause).into())
         }
-        match self.values {
-            Some(ref mut values) => values.extend(part.values),
-            None => self.values = Some(part.values),
-        }
-
+        self.values.extend(sql.params);
         self
     }
 
@@ -328,11 +314,14 @@ impl Query {
         self
     }
 
-    pub fn sql(&self) -> String {
-        self.to_sql().to_string()
+    pub fn sql(&self) -> Sql {
+        Sql {
+            clause: self.sql_clause(),
+            params: self.values.clone(),
+        }
     }
 
-    fn to_sql(&self) -> Arc<str> {
+    pub fn sql_clause(&self) -> String {
         vec![
             self.select.clone(),
             self.from.clone(),
@@ -357,8 +346,7 @@ impl Query {
     where
         T: Row,
     {
-        let sql = self.sql();
-        let rows = rows(&self.connection, sql.into(), self.values).await?;
+        let rows = rows(&self.connection, self.sql()).await?;
         Ok(rows)
     }
 
@@ -368,8 +356,7 @@ impl Query {
     where
         T: Row,
     {
-        let sql = self.sql();
-        let prep = prepare::<T>(&self.connection, sql.into(), self.values).await?;
+        let prep = prepare::<T>(&self.connection, self.sql()).await?;
         Ok(prep)
     }
 
@@ -380,7 +367,7 @@ impl Query {
 
     pub fn values(mut self, row: impl Row) -> Self {
         self.values_sql = Some(row.insert_sql().into());
-        self.values = Some(row.values());
+        self.values = row.values();
         self
     }
 
@@ -391,7 +378,7 @@ impl Query {
 
     pub fn set(mut self, row: impl Row) -> Self {
         self.set = Some(row.set_sql().into());
-        self.values = Some(row.values());
+        self.values = row.values();
         self
     }
 
@@ -405,18 +392,19 @@ impl Query {
         columns: Arc<str>,
     ) -> Result<T, Error> {
         self.returning = Some(format!("returning {}", columns).into());
-        let sql = self.to_sql();
-        let rows = rows::<T>(&self.connection, sql.clone(), self.values).await?;
+        let rows = rows::<T>(&self.connection, self.sql()).await?;
         if let Some(row) = rows.into_iter().nth(0) {
             Ok(row)
         } else {
-            Err(Error::InsertError(format!("failed to insert {}", sql)))
+            Err(Error::InsertError(format!(
+                "failed to insert {}",
+                self.sql().clause
+            )))
         }
     }
 
     pub async fn rows_affected(self) -> Result<usize, Error> {
-        let sql = self.to_sql();
-        let rows_affected = execute(&self.connection, sql.clone(), self.values).await?;
+        let rows_affected = execute(&self.connection, self.sql()).await?;
         Ok(rows_affected)
     }
 }
@@ -428,8 +416,7 @@ where
     T: DeserializeOwned + Send + Sync + 'static,
 {
     connection: tokio_rusqlite::Connection,
-    params: Option<Vec<Value>>,
-    sql: Arc<str>,
+    sql: Sql,
     phantom: PhantomData<T>,
 }
 
@@ -439,13 +426,13 @@ where
     T: DeserializeOwned + Send + Sync + 'static,
 {
     async fn all(&self) -> Result<Vec<T>, Error> {
-        let rows = rows::<T>(&self.connection, self.sql.clone(), self.params.clone()).await?;
+        let rows = rows::<T>(&self.connection, self.sql.clone()).await?;
         Ok(rows)
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Query {
     connection: tokio_rusqlite::Connection,
     select: Option<Arc<str>>,
@@ -457,7 +444,7 @@ pub struct Query {
     delete: Option<Arc<str>>,
     values_sql: Option<Arc<str>>,
     returning: Option<Arc<str>>,
-    values: Option<Vec<Value>>,
+    values: Vec<Value>,
     update: Option<Arc<str>>,
 }
 
@@ -509,37 +496,32 @@ pub fn count(columns: impl ToColumn) -> std::sync::Arc<str> {
     format!("count({}) as count", columns.to_column()).into()
 }
 
-pub fn and(left: WherePart, right: WherePart) -> WherePart {
-    let mut values: Vec<Value> = vec![];
-    values.extend(left.values);
-    values.extend(right.values);
+pub fn and(left: Sql, right: Sql) -> Sql {
+    let mut params: Vec<Value> = vec![];
+    params.extend(left.params);
+    params.extend(right.params);
 
-    WherePart {
+    Sql {
         clause: format!("({} and {})", left.clause, right.clause),
-        values,
+        params,
     }
 }
 
-pub fn or(left: WherePart, right: WherePart) -> WherePart {
-    let mut values: Vec<Value> = vec![];
-    values.extend(left.values);
-    values.extend(right.values);
+pub fn or(left: Sql, right: Sql) -> Sql {
+    let mut params: Vec<Value> = vec![];
+    params.extend(left.params);
+    params.extend(right.params);
 
-    WherePart {
+    Sql {
         clause: format!("({} or {})", left.clause, right.clause),
-        values,
+        params,
     }
 }
 
-pub struct WherePart {
-    clause: String,
-    values: Vec<Value>,
-}
-
-pub fn eq(left: impl ToColumn, right: impl Into<Value>) -> WherePart {
-    WherePart {
+pub fn eq(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+    Sql {
         clause: format!("{} = ?", left.to_column()),
-        values: vec![right.into()],
+        params: vec![right.into()],
     }
 }
 
@@ -683,7 +665,25 @@ impl ToSql for i64 {
     }
 }
 
+impl ToSql for f64 {
+    fn to_sql(&self) -> Value {
+        Value::Real(*self)
+    }
+}
+
+impl ToSql for Vec<u8> {
+    fn to_sql(&self) -> Value {
+        Value::Blob(self.clone())
+    }
+}
+
 impl ToSql for Integer {
+    fn to_sql(&self) -> Value {
+        Value::Lit(self.0)
+    }
+}
+
+impl ToSql for Blob {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
@@ -701,8 +701,9 @@ impl ToSql for Text {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Sql {
-    clause: std::sync::Arc<str>,
+    clause: String,
     params: Vec<Value>,
 }
 
@@ -771,6 +772,26 @@ mod tests {
         );
         assert_eq!(sql.params, vec![Value::Integer(1)]);
 
+        let sql: Sql = sql!("select * from {} where {} = {}", accounts, accounts.id, 1.0);
+        assert_eq!(
+            sql.clause.to_string(),
+            r#"select * from "accounts" where "accounts"."id" = ?"#
+        );
+        assert_eq!(sql.params, vec![Value::Real(1.0)]);
+
+        let bytes: Vec<u8> = vec![0x10];
+        let sql: Sql = sql!(
+            "select * from {} where {} = {}",
+            accounts,
+            accounts.id,
+            bytes
+        );
+        assert_eq!(
+            sql.clause.to_string(),
+            r#"select * from "accounts" where "accounts"."id" = ?"#
+        );
+        assert_eq!(sql.params, vec![Value::Blob(vec![0x10])]);
+
         Ok(())
     }
 
@@ -784,15 +805,24 @@ mod tests {
             eq(accounts.id, 1),
         ));
 
-        let sql = query.sql();
-        let params = query.values.unwrap();
+        let query2 = db.select(star()).from(accounts).r#where(sql!(
+            "(({} = {} and {} = {}) or {} = {})",
+            accounts.id,
+            "1",
+            accounts.id,
+            "1",
+            accounts.id,
+            1
+        ));
+
+        assert_eq!(query.sql_clause(), query2.sql_clause());
 
         assert_eq!(
-            sql,
+            query.sql_clause(),
             r#"select * from "accounts" where (("accounts"."id" = ? and "accounts"."id" = ?) or "accounts"."id" = ?)"#
         );
         assert_eq!(
-            params,
+            query.values,
             vec![
                 Value::Text("1".into()),
                 Value::Text("1".into()),
