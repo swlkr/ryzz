@@ -10,7 +10,7 @@ mod tests {
     use rizz::{and, connect, db, eq, or, Database, Error, Row, Table, Value};
     use serde::Deserialize;
 
-    use crate::Integer;
+    use crate::{count, star, Integer};
 
     type TestResult<T> = Result<T, Error>;
 
@@ -26,7 +26,7 @@ mod tests {
         let db = test_db().await?;
         let accounts = Accounts::new();
 
-        let query = db.select().from(accounts).r#where(or(
+        let query = db.select(star()).from(accounts).r#where(or(
             and(eq(accounts.id, "1"), eq(accounts.id, "1".to_owned())),
             eq(accounts.id, 1),
         ));
@@ -60,7 +60,7 @@ mod tests {
         let inserted: Account = db
             .insert(accounts)
             .values(Account { id: 1 })
-            .returning()
+            .returning(star())
             .await?;
 
         assert_eq!(inserted.id, 1);
@@ -70,13 +70,13 @@ mod tests {
             .update(accounts)
             .set(new_account)
             .r#where(eq(accounts.id, 1))
-            .returning()
+            .returning(star())
             .await?;
 
         assert_eq!(updated.id, 2);
 
         let rows: Vec<Account> = db
-            .select()
+            .select(star())
             .from(accounts)
             .r#where(eq(accounts.id, 2))
             .all()
@@ -93,7 +93,22 @@ mod tests {
 
         assert_eq!(rows_affected, 1);
 
+        let num_rows: Vec<RowCount> = db
+            .select(count(accounts.id))
+            .from(accounts)
+            .r#where(eq(accounts.id, 2))
+            .all()
+            .await?;
+
+        assert_ne!(num_rows.iter().nth(0), None);
+        assert_eq!(num_rows.iter().nth(0).unwrap().count, 0);
+
         Ok(())
+    }
+
+    #[derive(Row, Deserialize, PartialEq, Debug)]
+    struct RowCount {
+        count: i64,
     }
 
     #[derive(Row, Deserialize)]
@@ -239,8 +254,8 @@ impl Database {
         }
     }
 
-    pub fn select(&self) -> Query {
-        Query::new(self.connection.clone()).select(star())
+    pub fn select(&self, columns: Arc<str>) -> Query {
+        Query::new(self.connection.clone()).select(columns)
     }
 
     pub fn from(&self, table: impl Table) -> Query {
@@ -403,8 +418,8 @@ impl Query {
         }
     }
 
-    pub fn select(mut self, row: impl Row) -> Self {
-        self.select = Some(format!("select {}", row.column_names()).into());
+    pub fn select(mut self, columns: Arc<str>) -> Self {
+        self.select = Some(format!("select {}", columns).into());
 
         self
     }
@@ -506,8 +521,9 @@ impl Query {
 
     pub async fn returning<T: Row + DeserializeOwned + Send + Sync + 'static>(
         mut self,
+        columns: Arc<str>,
     ) -> Result<T, Error> {
-        self.returning = Some("returning *".into());
+        self.returning = Some(format!("returning {}", columns).into());
         let sql = self.to_sql();
         let rows = rows::<T>(&self.connection, sql.clone(), self.values).await?;
         if let Some(row) = rows.into_iter().nth(0) {
@@ -569,29 +585,12 @@ pub type Blob = &'static str;
 pub type Integer = &'static str;
 pub type Real = &'static str;
 
-#[derive(Default)]
-pub struct Star;
-
-impl Row for Star {
-    fn column_names(&self) -> &'static str {
-        "*"
-    }
-
-    fn values(&self) -> Vec<Value> {
-        vec![]
-    }
-
-    fn insert_sql(&self) -> &'static str {
-        ""
-    }
-
-    fn set_sql(&self) -> &'static str {
-        ""
-    }
+pub fn star() -> Arc<str> {
+    "*".into()
 }
 
-pub fn star() -> Star {
-    Star::default()
+pub fn count(columns: &'static str) -> Arc<str> {
+    format!("count({}) as count", columns).into()
 }
 
 pub fn and(left: WherePart, right: WherePart) -> WherePart {
@@ -673,7 +672,6 @@ impl From<Vec<u8>> for Value {
 }
 
 pub trait Row {
-    fn column_names(&self) -> &'static str;
     fn values(&self) -> Vec<Value>;
     fn insert_sql(&self) -> &'static str;
     fn set_sql(&self) -> &'static str;

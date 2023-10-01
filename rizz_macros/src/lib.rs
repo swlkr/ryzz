@@ -112,11 +112,6 @@ fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
             .collect::<Vec<_>>(),
         _ => unimplemented!(),
     };
-    let column_names = col_idents
-        .iter()
-        .map(|ident| ident.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
     let insert_sql = col_idents.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let insert_sql = format!("values ({})", insert_sql);
     let values = col_idents
@@ -135,10 +130,6 @@ fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
     let set_sql = format!("set {}", set_sql);
     Ok(quote! {
         impl rizz::Row for #struct_name {
-            fn column_names(&self) -> &'static str {
-                #column_names
-            }
-
             fn values(&self) -> Vec<Value> {
                 vec![#(#values,)*]
             }
