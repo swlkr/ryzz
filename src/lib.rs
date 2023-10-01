@@ -220,7 +220,7 @@ mod tests {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-use rusqlite::{OpenFlags, ToSql};
+use rusqlite::OpenFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use serde::de::DeserializeOwned;
 #[cfg(not(target_arch = "wasm32"))]
@@ -403,7 +403,7 @@ pub enum Synchronous {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Value {
-    fn to_sql(&self) -> &dyn ToSql {
+    fn to_sql(&self) -> &dyn rusqlite::ToSql {
         match self {
             Value::Text(s) => s,
             Value::Blob(b) => b,
@@ -716,11 +716,11 @@ impl ToColumn for Real {
     }
 }
 
-pub fn star() -> Arc<str> {
+pub fn star() -> std::sync::Arc<str> {
     "*".into()
 }
 
-pub fn count(columns: impl ToColumn) -> Arc<str> {
+pub fn count(columns: impl ToColumn) -> std::sync::Arc<str> {
     format!("count({}) as count", columns.to_column()).into()
 }
 

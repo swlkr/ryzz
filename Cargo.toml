@@ -13,7 +13,7 @@ members = [
 rizz_macros = { path = "rizz_macros", version = "0.1.0" }
 thiserror = { version = "1.0.48" }
 
-[dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1.32.0", features = ["rt-multi-thread", "macros"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
