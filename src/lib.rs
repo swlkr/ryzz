@@ -22,7 +22,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn select_where_and_or_like_sql_works() -> TestResult<()> {
+    async fn where_clauses_work() -> TestResult<()> {
         let db = test_db().await?;
         let accounts = Accounts::new();
 
