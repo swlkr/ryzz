@@ -55,6 +55,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         .collect::<Vec<_>>();
     let insert_sql = format!("insert into {} ({})", table_name, column_names);
     let update_sql = format!("update {}", table_name);
+    let delete_sql = format!("delete from {}", table_name);
 
     Ok(quote! {
         impl rizz::Table for #struct_name {
@@ -78,6 +79,10 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
 
             fn update_sql(&self) -> &'static str {
                 #update_sql
+            }
+
+            fn delete_sql(&self) -> &'static str {
+                #delete_sql
             }
         }
     })

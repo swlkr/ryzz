@@ -61,7 +61,6 @@ mod tests {
             .insert(accounts)
             .values(Account { id: 1 })
             .returning()
-            .execute()
             .await?;
 
         assert_eq!(inserted.id, 1);
@@ -72,10 +71,27 @@ mod tests {
             .set(new_account)
             .r#where(eq(accounts.id, 1))
             .returning()
-            .execute()
             .await?;
 
         assert_eq!(updated.id, 2);
+
+        let rows: Vec<Account> = db
+            .select()
+            .from(accounts)
+            .r#where(eq(accounts.id, 2))
+            .all()
+            .await?;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.iter().nth(0).unwrap().id, 2);
+
+        let rows_affected = db
+            .delete(accounts)
+            .r#where(eq(accounts.id, 2))
+            .rows_affected()
+            .await?;
+
+        assert_eq!(rows_affected, 1);
 
         Ok(())
     }
@@ -239,6 +255,10 @@ impl Database {
         Query::new(self.connection.clone()).update(table)
     }
 
+    pub fn delete(&self, table: impl Table) -> Query {
+        Query::new(self.connection.clone()).delete(table)
+    }
+
     pub async fn execute_batch(&self, sql: &str) -> Result<(), Error> {
         let sql = sql.to_owned();
         let _ = self
@@ -281,6 +301,32 @@ impl Value {
             Value::Integer(i) => i,
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn execute(
+    connection: &tokio_rusqlite::Connection,
+    sql: Arc<str>,
+    binds: Option<Vec<Value>>,
+) -> Result<usize, Error> {
+    let results = connection
+        .call(move |conn| {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows_affected = match binds {
+                Some(values) => {
+                    let params = values
+                        .iter()
+                        .map(|value| value.to_sql())
+                        .collect::<Vec<_>>();
+                    stmt.execute(&*params)?
+                }
+                None => stmt.execute([])?,
+            };
+            Ok(rows_affected)
+        })
+        .await?;
+
+    Ok(results)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -350,6 +396,7 @@ impl Query {
             insert_into: None,
             values_sql: None,
             values: None,
+            delete: None,
             set: None,
             update: None,
             returning: None,
@@ -397,6 +444,7 @@ impl Query {
             self.values_sql.clone(),
             self.update.clone(),
             self.set.clone(),
+            self.delete.clone(),
             self.r#where.clone(),
             self.returning.clone(),
             self.limit.clone(),
@@ -445,20 +493,21 @@ impl Query {
         self
     }
 
-    pub fn returning(mut self) -> Self {
-        self.returning = Some("returning *".into());
-        self
-    }
-
     pub fn set(mut self, row: impl Row) -> Self {
         self.set = Some(row.set_sql().into());
         self.values = Some(row.values());
         self
     }
 
-    pub async fn execute<T: Row + DeserializeOwned + Send + Sync + 'static>(
-        self,
+    pub fn delete(mut self, table: impl Table) -> Self {
+        self.delete = Some(table.delete_sql().into());
+        self
+    }
+
+    pub async fn returning<T: Row + DeserializeOwned + Send + Sync + 'static>(
+        mut self,
     ) -> Result<T, Error> {
+        self.returning = Some("returning *".into());
         let sql = self.to_sql();
         let rows = rows::<T>(&self.connection, sql.clone(), self.values).await?;
         if let Some(row) = rows.into_iter().nth(0) {
@@ -466,6 +515,12 @@ impl Query {
         } else {
             Err(Error::InsertError(format!("failed to insert {}", sql)))
         }
+    }
+
+    pub async fn rows_affected(self) -> Result<usize, Error> {
+        let sql = self.to_sql();
+        let rows_affected = execute(&self.connection, sql.clone(), self.values).await?;
+        Ok(rows_affected)
     }
 }
 
@@ -502,6 +557,7 @@ pub struct Query {
     limit: Option<Arc<str>>,
     insert_into: Option<Arc<str>>,
     set: Option<Arc<str>>,
+    delete: Option<Arc<str>>,
     values_sql: Option<Arc<str>>,
     returning: Option<Arc<str>>,
     values: Option<Vec<Value>>,
@@ -630,6 +686,7 @@ pub trait Table {
     fn column_names(&self) -> &'static str;
     fn insert_sql(&self) -> &'static str;
     fn update_sql(&self) -> &'static str;
+    fn delete_sql(&self) -> &'static str;
 }
 
 #[derive(thiserror::Error, Debug)]
