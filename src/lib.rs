@@ -1,4 +1,4 @@
-//! Rizz is a query builder and migration generator for sqlite. Don't call it an ORM.
+//! Rizz is a query builder and migration generator for sqlite, sort of like an ORM.
 //!
 extern crate self as rizz;
 
