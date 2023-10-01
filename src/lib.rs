@@ -10,7 +10,7 @@ mod tests {
     use rizz::{and, connect, db, eq, or, Database, Error, Row, Table, Value};
     use serde::Deserialize;
 
-    use crate::{count, star, Integer};
+    use crate::{count, star, Integer, Real, Text};
 
     type TestResult<T> = Result<T, Error>;
 
@@ -19,6 +19,101 @@ mod tests {
         let db = db(conn);
 
         Ok(db)
+    }
+
+    impl std::fmt::Display for Value {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Value::Lit(str) => f.write_str(str),
+                _ => f.write_str("?"),
+            }
+        }
+    }
+
+    trait ToSql {
+        fn to_sql(&self) -> Value;
+    }
+
+    impl ToSql for Accounts {
+        fn to_sql(&self) -> Value {
+            Value::Lit(self.table_name())
+        }
+    }
+
+    impl ToSql for &'static str {
+        fn to_sql(&self) -> Value {
+            Value::Text(self.to_owned().into())
+        }
+    }
+
+    impl ToSql for i64 {
+        fn to_sql(&self) -> Value {
+            Value::Integer(*self)
+        }
+    }
+
+    impl ToSql for Integer {
+        fn to_sql(&self) -> Value {
+            Value::Lit(self.0)
+        }
+    }
+
+    impl ToSql for Real {
+        fn to_sql(&self) -> Value {
+            Value::Lit(self.0)
+        }
+    }
+
+    impl ToSql for Text {
+        fn to_sql(&self) -> Value {
+            Value::Lit(self.0)
+        }
+    }
+
+    struct Sql {
+        clause: std::sync::Arc<str>,
+        params: Vec<Value>,
+    }
+
+    macro_rules! sql {
+        ($sql:expr, $($args:expr),*) => {{
+            let clause = format!($sql, $($args.to_sql(),)*);
+            let params = vec![
+            $($args.to_sql(),)*
+            ].into_iter().filter(|arg| match arg {
+                Value::Text(_) => true,
+                Value::Real(_) => true,
+                Value::Integer(_) => true,
+                Value::Blob(_) => true,
+                _ => false
+            }).collect::<Vec<_>>();
+
+            Sql {
+                clause: clause.into(),
+                params
+            }
+        }};
+    }
+
+    #[tokio::test]
+    async fn sql_macro_works() -> TestResult<()> {
+        let accounts = Accounts::new();
+
+        let sql: Sql = sql!("select * from {} where {} = {}", accounts, accounts.id, "1");
+        assert_eq!(
+            sql.clause.to_string(),
+            r#"select * from "accounts" where "accounts"."id" = ?"#
+        );
+        assert_eq!(sql.params, vec![Value::Text("1".into())]);
+
+        let sql: Sql = sql!("select * from {} where {} = {}", accounts, accounts.id, 1);
+        assert_eq!(
+            sql.clause.to_string(),
+            r#"select * from "accounts" where "accounts"."id" = ?"#
+        );
+        assert_eq!(sql.params, vec![Value::Integer(1)]);
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -36,7 +131,7 @@ mod tests {
 
         assert_eq!(
             sql,
-            "select * from accounts where ((accounts.id = ? and accounts.id = ?) or accounts.id = ?)"
+            r#"select * from "accounts" where (("accounts"."id" = ? and "accounts"."id" = ?) or "accounts"."id" = ?)"#
         );
         assert_eq!(
             params,
@@ -314,6 +409,7 @@ impl Value {
             Value::Blob(b) => b,
             Value::Real(r) => r,
             Value::Integer(i) => i,
+            Value::Lit(s) => s,
         }
     }
 }
@@ -580,17 +676,52 @@ pub struct Query {
     update: Option<Arc<str>>,
 }
 
-pub type Text = &'static str;
-pub type Blob = &'static str;
-pub type Integer = &'static str;
-pub type Real = &'static str;
+#[derive(Clone, Copy)]
+pub struct Text(&'static str);
+
+#[derive(Clone, Copy)]
+pub struct Blob(&'static str);
+
+#[derive(Clone, Copy)]
+pub struct Integer(&'static str);
+
+#[derive(Clone, Copy)]
+pub struct Real(&'static str);
+
+pub trait ToColumn {
+    fn to_column(&self) -> &'static str;
+}
+
+impl ToColumn for Text {
+    fn to_column(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl ToColumn for Integer {
+    fn to_column(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl ToColumn for Blob {
+    fn to_column(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl ToColumn for Real {
+    fn to_column(&self) -> &'static str {
+        self.0
+    }
+}
 
 pub fn star() -> Arc<str> {
     "*".into()
 }
 
-pub fn count(columns: &'static str) -> Arc<str> {
-    format!("count({}) as count", columns).into()
+pub fn count(columns: impl ToColumn) -> Arc<str> {
+    format!("count({}) as count", columns.to_column()).into()
 }
 
 pub fn and(left: WherePart, right: WherePart) -> WherePart {
@@ -620,15 +751,17 @@ pub struct WherePart {
     values: Vec<Value>,
 }
 
-pub fn eq(left: &'static str, right: impl Into<Value>) -> WherePart {
+pub fn eq(left: impl ToColumn, right: impl Into<Value>) -> WherePart {
     WherePart {
-        clause: format!("{} = ?", left),
+        clause: format!("{} = ?", left.to_column()),
         values: vec![right.into()],
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    // TODO: Null,
+    Lit(&'static str),
     Text(std::sync::Arc<str>),
     Blob(Vec<u8>),
     Real(f64),

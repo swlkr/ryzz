@@ -25,31 +25,38 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         .table_name
         .unwrap();
     let struct_name = input.ident;
-    let table_name = table_str.value();
-    let col_idents = match input.data {
+    let table_name = format!(r#""{}""#, table_str.value());
+    let col_pairs = match input.data {
         syn::Data::Struct(ref data) => data
             .fields
             .iter()
             .map(|field| {
-                field
-                    .ident
-                    .as_ref()
-                    .expect("Struct fields should have names")
+                (
+                    field
+                        .ident
+                        .as_ref()
+                        .expect("Struct fields should have names"),
+                    &field.ty,
+                )
             })
             .collect::<Vec<_>>(),
         _ => unimplemented!(),
     };
-    let column_names = col_idents
+    let column_names = col_pairs
         .iter()
-        .map(|ident| ident.to_string())
+        .map(|(ident, _)| ident.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    let attrs = col_idents
+    let attrs = col_pairs
         .iter()
-        .map(|ident| {
-            let value = format!("{}.{}", table_name, ident.to_string());
-            quote! {
-                #ident: #value
+        .map(|(ident, ty)| {
+            let value = format!(r#"{}."{}""#, table_name, ident.to_string());
+            match ty.into_token_stream().to_string().as_str() {
+                "Integer" => quote! { #ident: Integer(#value) },
+                "Blob" => quote! { #ident: Blob(#value) },
+                "Real" => quote! { #ident: Real(#value) },
+                "Text" => quote! { #ident: Text(#value) },
+                _ => unimplemented!(),
             }
         })
         .collect::<Vec<_>>();
