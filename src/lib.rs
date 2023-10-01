@@ -7,16 +7,21 @@ pub use rizz_macros::{Row, Table};
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
-    use rizz::{and, connect, db, eq, or, Error, Text, Value};
-    use rizz::{Row, Table};
+    use rizz::{and, connect, db, eq, or, Database, Error, Row, Table, Text, Value};
     use serde::Deserialize;
 
     type TestResult<T> = Result<T, Error>;
 
-    #[tokio::test]
-    async fn insert_sql_works() -> TestResult<()> {
+    async fn test_db() -> TestResult<Database> {
         let conn = connect(":memory:").await?;
         let db = db(conn);
+
+        Ok(db)
+    }
+
+    #[tokio::test]
+    async fn insert_sql_works() -> TestResult<()> {
+        let db = test_db().await?;
         let accounts = Accounts::new();
 
         let sql = db
@@ -37,8 +42,7 @@ mod tests {
 
     #[tokio::test]
     async fn select_where_and_or_like_sql_works() -> TestResult<()> {
-        let conn = connect(":memory:").await?;
-        let db = db(conn);
+        let db = test_db().await?;
         let accounts = Accounts::new();
 
         let query = db.select().from(accounts).r#where(or(
@@ -67,8 +71,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_works() -> TestResult<()> {
-        let conn = connect(":memory:").await?;
-        let db = db(conn);
+        let db = test_db().await?;
 
         let _ = db
             .execute_batch("create table accounts (account_id)")
