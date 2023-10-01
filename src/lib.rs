@@ -5,221 +5,6 @@ extern crate self as rizz;
 pub use rizz_macros::{Row, Table};
 
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(test)]
-mod tests {
-    use rizz::{and, connect, db, eq, or, Database, Error, Row, Table, Value};
-    use serde::Deserialize;
-
-    use crate::{count, star, Integer, Real, Text};
-
-    type TestResult<T> = Result<T, Error>;
-
-    async fn test_db() -> TestResult<Database> {
-        let conn = connect(":memory:").await?;
-        let db = db(conn);
-
-        Ok(db)
-    }
-
-    impl std::fmt::Display for Value {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Value::Lit(str) => f.write_str(str),
-                _ => f.write_str("?"),
-            }
-        }
-    }
-
-    trait ToSql {
-        fn to_sql(&self) -> Value;
-    }
-
-    impl ToSql for Accounts {
-        fn to_sql(&self) -> Value {
-            Value::Lit(self.table_name())
-        }
-    }
-
-    impl ToSql for &'static str {
-        fn to_sql(&self) -> Value {
-            Value::Text(self.to_owned().into())
-        }
-    }
-
-    impl ToSql for i64 {
-        fn to_sql(&self) -> Value {
-            Value::Integer(*self)
-        }
-    }
-
-    impl ToSql for Integer {
-        fn to_sql(&self) -> Value {
-            Value::Lit(self.0)
-        }
-    }
-
-    impl ToSql for Real {
-        fn to_sql(&self) -> Value {
-            Value::Lit(self.0)
-        }
-    }
-
-    impl ToSql for Text {
-        fn to_sql(&self) -> Value {
-            Value::Lit(self.0)
-        }
-    }
-
-    struct Sql {
-        clause: std::sync::Arc<str>,
-        params: Vec<Value>,
-    }
-
-    macro_rules! sql {
-        ($sql:expr, $($args:expr),*) => {{
-            let clause = format!($sql, $($args.to_sql(),)*);
-            let params = vec![
-            $($args.to_sql(),)*
-            ].into_iter().filter(|arg| match arg {
-                Value::Text(_) => true,
-                Value::Real(_) => true,
-                Value::Integer(_) => true,
-                Value::Blob(_) => true,
-                _ => false
-            }).collect::<Vec<_>>();
-
-            Sql {
-                clause: clause.into(),
-                params
-            }
-        }};
-    }
-
-    #[tokio::test]
-    async fn sql_macro_works() -> TestResult<()> {
-        let accounts = Accounts::new();
-
-        let sql: Sql = sql!("select * from {} where {} = {}", accounts, accounts.id, "1");
-        assert_eq!(
-            sql.clause.to_string(),
-            r#"select * from "accounts" where "accounts"."id" = ?"#
-        );
-        assert_eq!(sql.params, vec![Value::Text("1".into())]);
-
-        let sql: Sql = sql!("select * from {} where {} = {}", accounts, accounts.id, 1);
-        assert_eq!(
-            sql.clause.to_string(),
-            r#"select * from "accounts" where "accounts"."id" = ?"#
-        );
-        assert_eq!(sql.params, vec![Value::Integer(1)]);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn where_clauses_work() -> TestResult<()> {
-        let db = test_db().await?;
-        let accounts = Accounts::new();
-
-        let query = db.select(star()).from(accounts).r#where(or(
-            and(eq(accounts.id, "1"), eq(accounts.id, "1".to_owned())),
-            eq(accounts.id, 1),
-        ));
-
-        let sql = query.sql();
-        let params = query.values.unwrap();
-
-        assert_eq!(
-            sql,
-            r#"select * from "accounts" where (("accounts"."id" = ? and "accounts"."id" = ?) or "accounts"."id" = ?)"#
-        );
-        assert_eq!(
-            params,
-            vec![
-                Value::Text("1".into()),
-                Value::Text("1".into()),
-                Value::Integer(1)
-            ]
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn crud_works() -> TestResult<()> {
-        let db = test_db().await?;
-
-        let _ = db.execute_batch("create table accounts (id)").await?;
-
-        let accounts = Accounts::new();
-        let inserted: Account = db
-            .insert(accounts)
-            .values(Account { id: 1 })
-            .returning(star())
-            .await?;
-
-        assert_eq!(inserted.id, 1);
-
-        let new_account = Account { id: 2 };
-        let updated: Account = db
-            .update(accounts)
-            .set(new_account)
-            .r#where(eq(accounts.id, 1))
-            .returning(star())
-            .await?;
-
-        assert_eq!(updated.id, 2);
-
-        let rows: Vec<Account> = db
-            .select(star())
-            .from(accounts)
-            .r#where(eq(accounts.id, 2))
-            .all()
-            .await?;
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows.iter().nth(0).unwrap().id, 2);
-
-        let rows_affected = db
-            .delete(accounts)
-            .r#where(eq(accounts.id, 2))
-            .rows_affected()
-            .await?;
-
-        assert_eq!(rows_affected, 1);
-
-        let num_rows: Vec<RowCount> = db
-            .select(count(accounts.id))
-            .from(accounts)
-            .r#where(eq(accounts.id, 2))
-            .all()
-            .await?;
-
-        assert_ne!(num_rows.iter().nth(0), None);
-        assert_eq!(num_rows.iter().nth(0).unwrap().count, 0);
-
-        Ok(())
-    }
-
-    #[derive(Row, Deserialize, PartialEq, Debug)]
-    struct RowCount {
-        count: i64,
-    }
-
-    #[derive(Row, Deserialize)]
-    struct Account {
-        id: i64,
-    }
-
-    #[derive(Table, Clone, Copy)]
-    #[rizz(table = "accounts")]
-    struct Accounts {
-        #[rizz(primary_key)]
-        id: Integer,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 use rusqlite::OpenFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use serde::de::DeserializeOwned;
@@ -369,8 +154,8 @@ impl Database {
         Query::new(self.connection.clone()).delete(table)
     }
 
-    pub async fn execute_batch(&self, sql: &str) -> Result<(), Error> {
-        let sql = sql.to_owned();
+    pub async fn execute_batch(&self, sql: Sql) -> Result<(), Error> {
+        let sql = sql.clause;
         let _ = self
             .connection
             .call(move |conn| conn.execute_batch(&sql))
@@ -870,5 +655,224 @@ impl From<rusqlite::Error> for Error {
             rusqlite::Error::InvalidParameterCount(_, _) => todo!(),
             _ => todo!(),
         }
+    }
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Lit(str) => f.write_str(str),
+            _ => f.write_str("?"),
+        }
+    }
+}
+
+pub trait ToSql {
+    fn to_sql(&self) -> Value;
+}
+
+impl ToSql for &'static str {
+    fn to_sql(&self) -> Value {
+        Value::Text(self.to_owned().into())
+    }
+}
+
+impl ToSql for i64 {
+    fn to_sql(&self) -> Value {
+        Value::Integer(*self)
+    }
+}
+
+impl ToSql for Integer {
+    fn to_sql(&self) -> Value {
+        Value::Lit(self.0)
+    }
+}
+
+impl ToSql for Real {
+    fn to_sql(&self) -> Value {
+        Value::Lit(self.0)
+    }
+}
+
+impl ToSql for Text {
+    fn to_sql(&self) -> Value {
+        Value::Lit(self.0)
+    }
+}
+
+pub struct Sql {
+    clause: std::sync::Arc<str>,
+    params: Vec<Value>,
+}
+
+macro_rules! sql {
+    ($sql:expr) => {{
+        let clause = $sql;
+        let params = vec![];
+
+        Sql {
+            clause: clause.into(),
+            params
+        }
+    }};
+    ($sql:expr, $($args:expr),*) => {{
+        let clause = format!($sql, $($args.to_sql(),)*);
+        let params = vec![
+        $($args.to_sql(),)*
+        ].into_iter().filter(|arg| match arg {
+            Value::Text(_) => true,
+            Value::Real(_) => true,
+            Value::Integer(_) => true,
+            Value::Blob(_) => true,
+            _ => false
+        }).collect::<Vec<_>>();
+
+        Sql {
+            clause: clause.into(),
+            params
+        }
+    }};
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
+mod tests {
+    use rizz::{
+        and, connect, count, db, eq, or, star, Database, Error, Integer, Row, Sql, Table, ToSql,
+        Value,
+    };
+    use serde::Deserialize;
+
+    type TestResult<T> = Result<T, Error>;
+
+    async fn test_db() -> TestResult<Database> {
+        let conn = connect(":memory:").await?;
+        let db = db(conn);
+
+        Ok(db)
+    }
+
+    #[tokio::test]
+    async fn sql_macro_works() -> TestResult<()> {
+        let accounts = Accounts::new();
+
+        let sql = sql!("select * from {} where {} = {}", accounts, accounts.id, "1");
+        assert_eq!(
+            sql.clause.to_string(),
+            r#"select * from "accounts" where "accounts"."id" = ?"#
+        );
+        assert_eq!(sql.params, vec![Value::Text("1".into())]);
+
+        let sql: Sql = sql!("select * from {} where {} = {}", accounts, accounts.id, 1);
+        assert_eq!(
+            sql.clause.to_string(),
+            r#"select * from "accounts" where "accounts"."id" = ?"#
+        );
+        assert_eq!(sql.params, vec![Value::Integer(1)]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn where_clauses_work() -> TestResult<()> {
+        let db = test_db().await?;
+        let accounts = Accounts::new();
+
+        let query = db.select(star()).from(accounts).r#where(or(
+            and(eq(accounts.id, "1"), eq(accounts.id, "1".to_owned())),
+            eq(accounts.id, 1),
+        ));
+
+        let sql = query.sql();
+        let params = query.values.unwrap();
+
+        assert_eq!(
+            sql,
+            r#"select * from "accounts" where (("accounts"."id" = ? and "accounts"."id" = ?) or "accounts"."id" = ?)"#
+        );
+        assert_eq!(
+            params,
+            vec![
+                Value::Text("1".into()),
+                Value::Text("1".into()),
+                Value::Integer(1)
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn crud_works() -> TestResult<()> {
+        let db = test_db().await?;
+
+        let _ = db.execute_batch(sql!("create table accounts (id)")).await?;
+
+        let accounts = Accounts::new();
+        let inserted: Account = db
+            .insert(accounts)
+            .values(Account { id: 1 })
+            .returning(star())
+            .await?;
+
+        assert_eq!(inserted.id, 1);
+
+        let new_account = Account { id: 2 };
+        let updated: Account = db
+            .update(accounts)
+            .set(new_account)
+            .r#where(eq(accounts.id, 1))
+            .returning(star())
+            .await?;
+
+        assert_eq!(updated.id, 2);
+
+        let rows: Vec<Account> = db
+            .select(star())
+            .from(accounts)
+            .r#where(eq(accounts.id, 2))
+            .all()
+            .await?;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.iter().nth(0).unwrap().id, 2);
+
+        let rows_affected = db
+            .delete(accounts)
+            .r#where(eq(accounts.id, 2))
+            .rows_affected()
+            .await?;
+
+        assert_eq!(rows_affected, 1);
+
+        let num_rows: Vec<RowCount> = db
+            .select(count(accounts.id))
+            .from(accounts)
+            .r#where(eq(accounts.id, 2))
+            .all()
+            .await?;
+
+        assert_ne!(num_rows.iter().nth(0), None);
+        assert_eq!(num_rows.iter().nth(0).unwrap().count, 0);
+
+        Ok(())
+    }
+
+    #[derive(Row, Deserialize, PartialEq, Debug)]
+    struct RowCount {
+        count: i64,
+    }
+
+    #[derive(Row, Deserialize)]
+    struct Account {
+        id: i64,
+    }
+
+    #[derive(Table, Clone, Copy)]
+    #[rizz(table = "accounts")]
+    struct Accounts {
+        #[rizz(primary_key)]
+        id: Integer,
     }
 }

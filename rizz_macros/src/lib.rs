@@ -92,6 +92,12 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                 #delete_sql
             }
         }
+
+        impl rizz::ToSql for #struct_name {
+            fn to_sql(&self) -> Value {
+                Value::Lit(self.table_name())
+            }
+        }
     })
 }
 
