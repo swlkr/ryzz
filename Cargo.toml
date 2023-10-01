@@ -4,7 +4,13 @@ version = "0.1.0"
 edition = "2021"
 resolver = "2"
 
+[workspace]
+members = [
+  "rizz_macros"
+]
+
 [dependencies]
+rizz_macros = { path = "rizz_macros", version = "0.1.0" }
 thiserror = { version = "1.0.48" }
 
 [dev-dependencies]

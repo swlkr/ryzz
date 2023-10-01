@@ -1,0 +1,20 @@
+[package]
+name = "rizz_macros"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/swlkr/rizz"
+repository = "https://github.com/swlkr/rizz"
+keywords = ["rizz_macros"]
+description = "Macros for the rizz crate"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "1", features = ["full"] }
+proc-macro-error = "1"
+

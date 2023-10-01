@@ -2,6 +2,8 @@
 //!
 extern crate self as rizz;
 
+pub use rizz_macros::Table;
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
@@ -14,7 +16,7 @@ mod tests {
     async fn insert_sql_works() -> TestResult<()> {
         let conn = connect(":memory:").await?;
         let db = db(conn);
-        let accounts = Accounts::default();
+        let accounts = Accounts::new();
 
         let sql = db
             .insert(accounts)
@@ -36,7 +38,7 @@ mod tests {
     async fn select_where_and_or_like_sql_works() -> TestResult<()> {
         let conn = connect(":memory:").await?;
         let db = db(conn);
-        let accounts = Accounts::table();
+        let accounts = Accounts::new();
 
         let query = db.select().from(accounts).r#where(or(
             and(
@@ -71,7 +73,7 @@ mod tests {
             .execute_batch("create table accounts (account_id)")
             .await?;
 
-        let accounts = Accounts::table();
+        let accounts = Accounts::new();
         let inserted: Account = db
             .insert(accounts)
             .values(Account {
@@ -105,25 +107,11 @@ mod tests {
         }
     }
 
-    #[derive(Default, Clone, Copy)]
+    #[derive(Table, Clone, Copy)]
+    #[rizz(table = "accounts")]
     struct Accounts {
+        #[rizz(primary_key)]
         account_id: Text,
-    }
-
-    impl Table for Accounts {
-        fn table() -> Self {
-            Self {
-                account_id: "accounts.account_id",
-            }
-        }
-
-        fn table_name(&self) -> &'static str {
-            "accounts"
-        }
-
-        fn column_names(&self) -> &'static str {
-            "account_id"
-        }
     }
 }
 
@@ -640,7 +628,7 @@ pub trait Row {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub trait Table {
-    fn table() -> Self;
+    fn new() -> Self;
     fn table_name(&self) -> &'static str;
     fn column_names(&self) -> &'static str;
 }
