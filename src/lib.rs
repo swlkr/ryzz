@@ -2,12 +2,13 @@
 //!
 extern crate self as rizz;
 
-pub use rizz_macros::Table;
+pub use rizz_macros::{Row, Table};
 
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
-    use rizz::{and, connect, db, eq, or, Error, Row, Table, Text, Value};
+    use rizz::{and, connect, db, eq, or, Error, Text, Value};
+    use rizz::{Row, Table};
     use serde::Deserialize;
 
     type TestResult<T> = Result<T, Error>;
@@ -88,19 +89,9 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Deserialize)]
+    #[derive(Row, Deserialize)]
     struct Account {
         account_id: String,
-    }
-
-    impl Row for Account {
-        fn column_names(&self) -> &'static str {
-            "accounts.account_id".into()
-        }
-
-        fn insert_values(self) -> Vec<Value> {
-            vec![Value::from(self.account_id)]
-        }
     }
 
     #[derive(Table, Clone, Copy)]
@@ -362,7 +353,7 @@ impl Query {
             r#where: None,
             limit: None,
             insert_into: None,
-            placeholders: None,
+            values_sql: None,
             values: None,
             returning: None,
         }
@@ -404,7 +395,7 @@ impl Query {
     fn to_sql(&self) -> Arc<str> {
         vec![
             self.insert_into.clone(),
-            self.placeholders.clone(),
+            self.values_sql.clone(),
             self.returning.clone(),
             self.select.clone(),
             self.from.clone(),
@@ -440,22 +431,13 @@ impl Query {
     }
 
     pub fn insert(mut self, table: impl Table) -> Self {
-        self.insert_into = Some(
-            format!(
-                "insert into {} ({})",
-                table.table_name(),
-                table.column_names()
-            )
-            .into(),
-        );
+        self.insert_into = Some(table.insert_sql().into());
         self
     }
 
     pub fn values(mut self, row: impl Row) -> Self {
-        let values = row.insert_values();
-        let placeholders = &values.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        self.placeholders = Some(format!("values ({})", placeholders).into());
-        self.values = Some(values);
+        self.values_sql = Some(row.insert_sql().into());
+        self.values = Some(row.insert_values());
         self
     }
 
@@ -509,7 +491,7 @@ pub struct Query {
     r#where: Option<Arc<str>>,
     limit: Option<Arc<str>>,
     insert_into: Option<Arc<str>>,
-    placeholders: Option<Arc<str>>,
+    values_sql: Option<Arc<str>>,
     returning: Option<Arc<str>>,
     values: Option<Vec<Value>>,
 }
@@ -527,8 +509,12 @@ impl Row for Star {
         "*"
     }
 
-    fn insert_values(self) -> Vec<Value> {
+    fn insert_values(&self) -> Vec<Value> {
         vec![]
+    }
+
+    fn insert_sql(&self) -> &'static str {
+        ""
     }
 }
 
@@ -616,7 +602,8 @@ impl From<Vec<u8>> for Value {
 
 pub trait Row {
     fn column_names(&self) -> &'static str;
-    fn insert_values(self) -> Vec<Value>;
+    fn insert_values(&self) -> Vec<Value>;
+    fn insert_sql(&self) -> &'static str;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -624,6 +611,7 @@ pub trait Table {
     fn new() -> Self;
     fn table_name(&self) -> &'static str;
     fn column_names(&self) -> &'static str;
+    fn insert_sql(&self) -> &'static str;
 }
 
 #[derive(thiserror::Error, Debug)]

@@ -53,6 +53,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
             }
         })
         .collect::<Vec<_>>();
+    let insert_sql = format!("insert into {} ({})", table_name, column_names);
 
     Ok(quote! {
         impl rizz::Table for #struct_name {
@@ -68,6 +69,66 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
 
             fn column_names(&self) -> &'static str {
                 #column_names
+            }
+
+            fn insert_sql(&self) -> &'static str {
+                #insert_sql
+            }
+        }
+    })
+}
+
+#[proc_macro_derive(Row, attributes(rizz))]
+pub fn row(s: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(s as DeriveInput);
+    match row_macro(input) {
+        Ok(s) => s.to_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let struct_name = input.ident;
+    let col_idents = match input.data {
+        syn::Data::Struct(ref data) => data
+            .fields
+            .iter()
+            .map(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .expect("Struct fields should have names")
+            })
+            .collect::<Vec<_>>(),
+        _ => unimplemented!(),
+    };
+    let column_names = col_idents
+        .iter()
+        .map(|ident| ident.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let insert_sql = col_idents.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let insert_sql = format!("values ({})", insert_sql);
+    let insert_values = col_idents
+        .iter()
+        .map(|ident| {
+            quote! {
+                Value::from(self.#ident.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(quote! {
+        impl rizz::Row for #struct_name {
+            fn column_names(&self) -> &'static str {
+                #column_names
+            }
+
+            fn insert_values(&self) -> Vec<Value> {
+                vec![#(#insert_values,)*]
+            }
+
+            fn insert_sql(&self) -> &'static str {
+                #insert_sql
             }
         }
     })
