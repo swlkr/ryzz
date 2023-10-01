@@ -98,12 +98,8 @@ mod tests {
             "accounts.account_id".into()
         }
 
-        fn insert_placeholders(&self) -> &'static str {
-            "?".into()
-        }
-
-        fn insert_values(&self) -> Vec<Value> {
-            vec![Value::from(self.account_id.clone())]
+        fn insert_values(self) -> Vec<Value> {
+            vec![Value::from(self.account_id)]
         }
     }
 
@@ -456,8 +452,10 @@ impl Query {
     }
 
     pub fn values(mut self, row: impl Row) -> Self {
-        self.placeholders = Some(format!("values ({})", row.insert_placeholders()).into());
-        self.values = Some(row.insert_values());
+        let values = row.insert_values();
+        let placeholders = &values.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        self.placeholders = Some(format!("values ({})", placeholders).into());
+        self.values = Some(values);
         self
     }
 
@@ -529,11 +527,7 @@ impl Row for Star {
         "*"
     }
 
-    fn insert_placeholders(&self) -> &'static str {
-        ""
-    }
-
-    fn insert_values(&self) -> Vec<Value> {
+    fn insert_values(self) -> Vec<Value> {
         vec![]
     }
 }
@@ -622,8 +616,7 @@ impl From<Vec<u8>> for Value {
 
 pub trait Row {
     fn column_names(&self) -> &'static str;
-    fn insert_placeholders(&self) -> &'static str;
-    fn insert_values(&self) -> Vec<Value>;
+    fn insert_values(self) -> Vec<Value>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
