@@ -43,7 +43,11 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
             .collect::<Vec<_>>(),
         _ => unimplemented!(),
     };
-    let column_defs = attrs
+    let column_fields = attrs
+        .iter()
+        .filter(|(_, ty, _)| ty.to_token_stream().to_string() != "Index")
+        .collect::<Vec<_>>();
+    let column_defs = column_fields
         .iter()
         .filter_map(|(ident, ty, attrs)| {
             let rizz_attr = if let Some(attr) = attrs.iter().nth(0) {
@@ -60,6 +64,10 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                     true => Some("primary key".into()),
                     false => None,
                 };
+                let unique = match rizz_attr.unique {
+                    true => Some("unique".into()),
+                    false => None,
+                };
                 let data_type = ty.to_token_stream().to_string().to_lowercase();
                 let default_value = match &rizz_attr.default_value {
                     Some(s) => Some(format!("default {}", s.value())),
@@ -74,6 +82,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                         Some(ident.to_string()),
                         Some(data_type),
                         primary_key,
+                        unique,
                         not_null,
                         default_value,
                         references,
@@ -89,7 +98,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         })
         .collect::<Vec<_>>()
         .join(",");
-    let column_names = attrs
+    let column_names = column_fields
         .iter()
         .map(|(ident, _, _)| ident.to_string())
         .collect::<Vec<_>>()
@@ -98,18 +107,40 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         .iter()
         .filter(
             |(_, ty, _)| match ty.to_token_stream().to_string().as_ref() {
-                "Index" | "UniqueIndex" => true,
+                "Index" => true,
                 _ => false,
             },
         )
-        .filter_map(|(_, _, attrs)| attrs.iter().nth(0))
-        .filter_map(|attr| attr.parse_args::<RizzAttr>().ok())
-        .filter_map(|attr| match attr.columns {
-            Some(col) => Some(col.value()),
-            None => None,
-        })
+        .map(|(ident, _, _)| ident.to_string())
         .collect::<Vec<_>>()
         .join(",");
+    let index_defs = attrs
+        .iter()
+        .filter(|(_, ty, _)| ty.to_token_stream().to_string() == "Index")
+        .map(|(ident, _, attrs)| {
+            let rizz_attr = attrs
+                .iter()
+                .nth(0)
+                .expect("Index requires a #[rizz] attr")
+                .parse_args::<RizzAttr>()
+                .expect("Unable to parse #[rizz] attr");
+            let columns = rizz_attr
+                .columns
+                .expect("#[rizz(columns = \"\")] on index requires at least one column");
+            let unique = match rizz_attr.unique {
+                true => " unique ",
+                false => "",
+            };
+            format!(
+                "create{}index if not exists {} on {} ({})",
+                unique,
+                ident,
+                table_name,
+                columns.value()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
     let attrs = attrs
         .iter()
         .map(|(ident, ty, _)| {
@@ -119,6 +150,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                 "Blob" => quote! { #ident: Blob(#value) },
                 "Real" => quote! { #ident: Real(#value) },
                 "Text" => quote! { #ident: Text(#value) },
+                "Index" => quote! { #ident: "" },
                 _ => unimplemented!(),
             }
         })
@@ -126,7 +158,11 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
     let insert_sql = format!("insert into {} ({})", table_name, column_names);
     let update_sql = format!("update {}", table_name);
     let delete_sql = format!("delete from {}", table_name);
-    let create_table_sql = format!("create table {} ({})", table_name, column_defs);
+    let create_table_sql = format!(
+        "create table if not exists {} ({})",
+        table_name, column_defs
+    );
+    let create_indices_sql = index_defs;
 
     Ok(quote! {
         impl rizz::Table for #struct_name {
@@ -162,6 +198,10 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
 
             fn create_table_sql(&self) -> &'static str {
                 #create_table_sql
+            }
+
+            fn create_indices_sql(&self) -> &'static str {
+                #create_indices_sql
             }
         }
 
@@ -285,6 +325,7 @@ impl Parse for RizzAttr {
                     {
                         "not_null" => rizzle_attr.not_null = true,
                         "primary_key" => rizzle_attr.primary_key = true,
+                        "unique" => rizzle_attr.unique = true,
                         _ => unimplemented!(),
                     },
                     _ => {}
@@ -307,6 +348,7 @@ struct RizzAttr {
     table_name: Option<LitStr>,
     primary_key: bool,
     not_null: bool,
+    unique: bool,
     default_value: Option<LitStr>,
     columns: Option<LitStr>,
     references: Option<LitStr>,

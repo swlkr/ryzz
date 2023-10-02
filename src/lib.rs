@@ -18,7 +18,7 @@ macro_rules! schema {
         rizz::Schema {
             tables: vec![$(($args.table_name(),$args.create_table_sql()),)*],
             columns: vec![$($args.column_names(),)*],
-            indices: vec![$($args.index_names(),)*]
+            indices: vec![$(($args.index_names(),$args.create_indices_sql()),)*]
         }
     }}
 }
@@ -219,11 +219,13 @@ impl Database {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Migrator {
     db: Database,
     dry_run: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Migrator {
     fn new(db: Database) -> Self {
         Migrator { db, dry_run: false }
@@ -235,13 +237,18 @@ impl Migrator {
     }
 
     pub async fn migrate(&self) -> Result<String, Error> {
-        let migrations = vec![self.create_tables_sql().await, self.drop_tables_sql().await]
-            .into_iter()
-            .filter(|x| x.is_ok())
-            .map(|x| x.unwrap())
-            .filter(|x| !x.is_empty())
-            .collect::<Vec<_>>()
-            .join(";");
+        let migrations = vec![
+            self.drop_indices_sql().await,
+            self.drop_tables_sql().await,
+            Ok(self.create_tables_sql()),
+            Ok(self.create_indices_sql()),
+        ]
+        .into_iter()
+        .filter(|x| x.is_ok())
+        .map(|x| x.unwrap())
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>()
+        .join(";\n");
         if self.dry_run == true {
             Ok(migrations)
         } else {
@@ -250,50 +257,25 @@ impl Migrator {
         }
     }
 
-    pub async fn create_tables_sql(&self) -> Result<String, Error> {
-        #[derive(Row, Deserialize)]
-        struct TableName {
-            name: String,
-        }
-
-        let rows: Vec<TableName> = self
-            .db
-            .query(sql!(
-                "select name from sqlite_schema where type = {}",
-                "table"
-            ))
-            .await?;
-        let sql = self
-            .db
+    pub fn create_tables_sql(&self) -> String {
+        self.db
             .schema
             .tables
             .iter()
-            .filter(|(table_name, _)| {
-                !rows
-                    .iter()
-                    .map(|r| r.name.as_str())
-                    .collect::<Vec<_>>()
-                    .contains(table_name)
-            })
             .map(|(_, sql)| *sql)
             .collect::<Vec<_>>()
-            .join(";");
-
-        Ok(sql)
+            .join(";")
     }
 
     pub async fn drop_tables_sql(&self) -> Result<String, Error> {
         #[derive(Row, Deserialize, Debug)]
-        struct TableName {
+        struct Table {
             name: String,
         }
 
-        let rows: Vec<TableName> = self
+        let rows: Vec<Table> = self
             .db
-            .query(sql!(
-                "select name from sqlite_schema where type = {}",
-                "table"
-            ))
+            .query(sql!("select name from sqlite_schema where type = 'table'"))
             .await?;
         let sql = rows
             .iter()
@@ -312,6 +294,45 @@ impl Migrator {
             .join(";");
 
         Ok(sql)
+    }
+
+    pub async fn drop_indices_sql(&self) -> Result<String, Error> {
+        #[derive(Row, Deserialize, Debug)]
+        struct Index {
+            name: String,
+        }
+
+        let rows: Vec<Index> = self
+            .db
+            .query(sql!("select name from sqlite_schema where type = 'index'"))
+            .await?;
+        let sql = rows
+            .iter()
+            .filter(|idx| {
+                !self
+                    .db
+                    .schema
+                    .indices
+                    .iter()
+                    .map(|(name, _)| String::from(*name))
+                    .collect::<Vec<_>>()
+                    .contains(&idx.name)
+            })
+            .map(|idx| format!(r#"drop index "{}""#, idx.name))
+            .collect::<Vec<_>>()
+            .join(";");
+
+        Ok(sql)
+    }
+
+    pub fn create_indices_sql(&self) -> String {
+        self.db
+            .schema
+            .indices
+            .iter()
+            .map(|(_, sql)| *sql)
+            .collect::<Vec<_>>()
+            .join(";")
     }
 }
 
@@ -602,6 +623,8 @@ pub struct Integer(&'static str);
 #[derive(Clone, Copy)]
 pub struct Real(&'static str);
 
+pub type Index = &'static str;
+
 pub trait ToColumn {
     fn to_column(&self) -> &'static str;
 }
@@ -731,6 +754,7 @@ pub trait Table {
     fn delete_sql(&self) -> &'static str;
     fn index_names(&self) -> &'static str;
     fn create_table_sql(&self) -> &'static str;
+    fn create_indices_sql(&self) -> &'static str;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -786,6 +810,7 @@ impl From<rusqlite::Error> for Error {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -795,69 +820,80 @@ impl std::fmt::Display for Value {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub trait ToSql {
     fn to_sql(&self) -> Value;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for &'static str {
     fn to_sql(&self) -> Value {
         Value::Text(self.to_owned().into())
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for i64 {
     fn to_sql(&self) -> Value {
         Value::Integer(*self)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for f64 {
     fn to_sql(&self) -> Value {
         Value::Real(*self)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Vec<u8> {
     fn to_sql(&self) -> Value {
         Value::Blob(self.clone())
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Integer {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Blob {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Real {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Text {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Sql {
     clause: String,
     params: Vec<Value>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Schema {
     tables: Vec<(&'static str, &'static str)>,
     columns: Vec<&'static str>,
-    indices: Vec<&'static str>,
+    indices: Vec<(&'static str, &'static str)>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -868,12 +904,15 @@ mod tests {
     };
     use serde::Deserialize;
 
+    use crate::{Index, Text};
+
     type TestResult<T> = Result<T, Error>;
 
     async fn test_db() -> TestResult<Database> {
         let accounts = Accounts::new();
         let schema = schema!(accounts);
         let db = connect(":memory:").await?.db(schema);
+        let _ = db.clone().migrator().migrate().await?;
 
         Ok(db)
     }
@@ -960,19 +999,22 @@ mod tests {
     #[tokio::test]
     async fn crud_works() -> TestResult<()> {
         let db = test_db().await?;
-
-        let _ = db.execute_batch("create table accounts (id)").await?;
-
         let accounts = Accounts::new();
         let inserted: Account = db
             .insert(accounts)
-            .values(Account { id: 1 })
+            .values(Account {
+                id: 1,
+                name: "".into(),
+            })
             .returning(star())
             .await?;
 
         assert_eq!(inserted.id, 1);
 
-        let new_account = Account { id: 2 };
+        let new_account = Account {
+            id: 2,
+            name: "".into(),
+        };
         let updated: Account = db
             .update(accounts)
             .set(new_account)
@@ -1016,7 +1058,7 @@ mod tests {
     #[tokio::test]
     async fn migrating_tables_works() -> TestResult<()> {
         #[derive(Deserialize)]
-        struct TableName {
+        struct SqliteSchema {
             name: String,
         }
 
@@ -1026,12 +1068,12 @@ mod tests {
         let db = conn.clone().db(schema);
         let migrations = db.clone().migrator().dry_run(true).migrate().await?;
         assert_eq!(
-            r#"create table "accounts" (id integer primary key)"#,
+            "create table if not exists \"accounts\" (id integer primary key,name text not null);\ncreate unique index if not exists accounts_name_index on \"accounts\" (name)",
             migrations
         );
 
         let _ = db.clone().migrator().migrate().await?;
-        let tables: Vec<TableName> = db
+        let tables: Vec<SqliteSchema> = db
             .query(sql!("select name from sqlite_schema where type = 'table'"))
             .await?;
         let tables = tables.into_iter().map(|x| x.name).collect::<Vec<_>>();
@@ -1040,14 +1082,24 @@ mod tests {
         let new_schema = schema!();
         let db = Database::new(conn, new_schema);
         let migrations = db.clone().migrator().dry_run(true).migrate().await?;
-        assert_eq!(r#"drop table "accounts""#, migrations);
+        assert_eq!(
+            "drop index \"accounts_name_index\";\ndrop table \"accounts\"",
+            migrations
+        );
 
         let _ = db.clone().migrator().migrate().await?;
         let num_tables = db
-            .query::<TableName>(sql!("select name from sqlite_schema where type = 'table'"))
+            .query::<SqliteSchema>(sql!("select name from sqlite_schema where type = 'table'"))
             .await?
             .len();
         assert_eq!(0, num_tables);
+
+        let _ = db.clone().migrator().migrate().await?;
+        let num_indices = db
+            .query::<SqliteSchema>(sql!("select name from sqlite_schema where type = 'index'"))
+            .await?
+            .len();
+        assert_eq!(0, num_indices);
 
         Ok(())
     }
@@ -1060,6 +1112,7 @@ mod tests {
     #[derive(Row, Deserialize)]
     struct Account {
         id: i64,
+        name: String,
     }
 
     #[derive(Table, Clone, Copy)]
@@ -1067,5 +1120,9 @@ mod tests {
     struct Accounts {
         #[rizz(primary_key)]
         id: Integer,
+        #[rizz(not_null)]
+        name: Text,
+        #[rizz(columns = "name", unique)]
+        accounts_name_index: Index,
     }
 }
