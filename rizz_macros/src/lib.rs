@@ -203,7 +203,7 @@ fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
         .iter()
         .map(|ident| {
             quote! {
-                Value::from(self.#ident.clone())
+                rizz::Value::from(self.#ident.clone())
             }
         })
         .collect::<Vec<_>>();
@@ -215,7 +215,7 @@ fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
     let set_sql = format!("set {}", set_sql);
     Ok(quote! {
         impl rizz::Row for #struct_name {
-            fn values(&self) -> Vec<Value> {
+            fn values(&self) -> Vec<rizz::Value> {
                 vec![#(#values,)*]
             }
 
