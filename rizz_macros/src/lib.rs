@@ -21,7 +21,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         .iter()
         .filter_map(|attr| attr.parse_args::<RizzAttr>().ok())
         .last()
-        .expect("define #![rizzle(table = \"your table name here\")] on struct")
+        .expect("define #![rizz(table = \"your table name here\")] on struct")
         .table_name
         .unwrap();
     let struct_name = input.ident;
