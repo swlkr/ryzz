@@ -26,7 +26,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         .unwrap();
     let struct_name = input.ident;
     let table_name = format!(r#""{}""#, table_str.value());
-    let col_pairs = match input.data {
+    let attrs = match input.data {
         syn::Data::Struct(ref data) => data
             .fields
             .iter()
@@ -37,19 +37,82 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                         .as_ref()
                         .expect("Struct fields should have names"),
                     &field.ty,
+                    &field.attrs,
                 )
             })
             .collect::<Vec<_>>(),
         _ => unimplemented!(),
     };
-    let column_names = col_pairs
+    let column_defs = attrs
         .iter()
-        .map(|(ident, _)| ident.to_string())
+        .filter_map(|(ident, ty, attrs)| {
+            let rizz_attr = if let Some(attr) = attrs.iter().nth(0) {
+                attr.parse_args::<RizzAttr>().ok()
+            } else {
+                None
+            };
+            if let Some(rizz_attr) = rizz_attr {
+                let not_null = match rizz_attr.not_null {
+                    true => Some("not null".into()),
+                    false => None,
+                };
+                let primary_key = match rizz_attr.primary_key {
+                    true => Some("primary key".into()),
+                    false => None,
+                };
+                let data_type = ty.to_token_stream().to_string().to_lowercase();
+                let default_value = match &rizz_attr.default_value {
+                    Some(s) => Some(format!("default {}", s.value())),
+                    None => None,
+                };
+                let references = match &rizz_attr.references {
+                    Some(rf) => Some(format!("references {}", rf.value())),
+                    None => None,
+                };
+                Some(
+                    vec![
+                        Some(ident.to_string()),
+                        Some(data_type),
+                        primary_key,
+                        not_null,
+                        default_value,
+                        references,
+                    ]
+                    .into_iter()
+                    .filter_map(|s| s)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                )
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>()
         .join(",");
-    let attrs = col_pairs
+    let column_names = attrs
         .iter()
-        .map(|(ident, ty)| {
+        .map(|(ident, _, _)| ident.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let index_names = attrs
+        .iter()
+        .filter(
+            |(_, ty, _)| match ty.to_token_stream().to_string().as_ref() {
+                "Index" | "UniqueIndex" => true,
+                _ => false,
+            },
+        )
+        .filter_map(|(_, _, attrs)| attrs.iter().nth(0))
+        .filter_map(|attr| attr.parse_args::<RizzAttr>().ok())
+        .filter_map(|attr| match attr.columns {
+            Some(col) => Some(col.value()),
+            None => None,
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let attrs = attrs
+        .iter()
+        .map(|(ident, ty, _)| {
             let value = format!(r#"{}."{}""#, table_name, ident.to_string());
             match ty.into_token_stream().to_string().as_str() {
                 "Integer" => quote! { #ident: Integer(#value) },
@@ -63,6 +126,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
     let insert_sql = format!("insert into {} ({})", table_name, column_names);
     let update_sql = format!("update {}", table_name);
     let delete_sql = format!("delete from {}", table_name);
+    let create_table_sql = format!("create table {} ({})", table_name, column_defs);
 
     Ok(quote! {
         impl rizz::Table for #struct_name {
@@ -90,6 +154,14 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
 
             fn delete_sql(&self) -> &'static str {
                 #delete_sql
+            }
+
+            fn index_names(&self) -> &'static str {
+                #index_names
+            }
+
+            fn create_table_sql(&self) -> &'static str {
+                #create_table_sql
             }
         }
 

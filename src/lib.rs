@@ -8,12 +8,50 @@ pub use rizz_macros::{Row, Table};
 use rusqlite::OpenFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{marker::PhantomData, sync::Arc};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn db(connection: Connection) -> Database {
-    Database::new(connection)
+macro_rules! schema {
+    ($($args:ident),*) => {{
+        rizz::Schema {
+            tables: vec![$(($args.table_name(),$args.create_table_sql()),)*],
+            columns: vec![$($args.column_names(),)*],
+            indices: vec![$($args.index_names(),)*]
+        }
+    }}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! sql {
+    ($sql:expr) => {{
+        let clause = $sql;
+        let params = vec![];
+
+        rizz::Sql {
+            clause: clause.into(),
+            params
+        }
+    }};
+    ($sql:expr, $($args:expr),*) => {{
+        use rizz::ToSql;
+        let clause = format!($sql, $($args.to_sql(),)*);
+        let params = vec![
+        $($args.to_sql(),)*
+        ].into_iter().filter(|arg| match arg {
+            Value::Text(_) => true,
+            Value::Real(_) => true,
+            Value::Integer(_) => true,
+            Value::Blob(_) => true,
+            _ => false
+        }).collect::<Vec<_>>();
+
+        rizz::Sql {
+            clause: clause.into(),
+            params
+        }
+    }};
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -118,19 +156,25 @@ impl Connection {
 
         Ok(self)
     }
+
+    pub fn db(self, schema: Schema) -> Database {
+        Database::new(self, schema)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Database {
     connection: tokio_rusqlite::Connection,
+    schema: Schema,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Database {
-    fn new(connection: Connection) -> Self {
+    fn new(connection: Connection, schema: Schema) -> Self {
         Self {
             connection: connection.conn.expect("Database file not found"),
+            schema,
         }
     }
 
@@ -154,8 +198,8 @@ impl Database {
         Query::new(self.connection.clone()).delete(table)
     }
 
-    pub async fn execute_batch(&self, sql: Sql) -> Result<(), Error> {
-        let sql = sql.clause;
+    pub async fn execute_batch(&self, sql: &str) -> Result<(), Error> {
+        let sql: Arc<str> = sql.into();
         let _ = self
             .connection
             .call(move |conn| conn.execute_batch(&sql))
@@ -168,6 +212,106 @@ impl Database {
         sql: Sql,
     ) -> Result<Vec<T>, Error> {
         rows::<T>(&self.connection, sql).await
+    }
+
+    pub fn migrator(self) -> Migrator {
+        Migrator::new(self)
+    }
+}
+
+pub struct Migrator {
+    db: Database,
+    dry_run: bool,
+}
+
+impl Migrator {
+    fn new(db: Database) -> Self {
+        Migrator { db, dry_run: false }
+    }
+
+    fn dry_run(mut self, arg: bool) -> Self {
+        self.dry_run = arg;
+        self
+    }
+
+    pub async fn migrate(&self) -> Result<String, Error> {
+        let migrations = vec![self.create_tables_sql().await, self.drop_tables_sql().await]
+            .into_iter()
+            .filter(|x| x.is_ok())
+            .map(|x| x.unwrap())
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>()
+            .join(";");
+        if self.dry_run == true {
+            Ok(migrations)
+        } else {
+            let _ = self.db.execute_batch(migrations.as_str()).await?;
+            Ok("".into())
+        }
+    }
+
+    pub async fn create_tables_sql(&self) -> Result<String, Error> {
+        #[derive(Row, Deserialize)]
+        struct TableName {
+            name: String,
+        }
+
+        let rows: Vec<TableName> = self
+            .db
+            .query(sql!(
+                "select name from sqlite_schema where type = {}",
+                "table"
+            ))
+            .await?;
+        let sql = self
+            .db
+            .schema
+            .tables
+            .iter()
+            .filter(|(table_name, _)| {
+                !rows
+                    .iter()
+                    .map(|r| r.name.as_str())
+                    .collect::<Vec<_>>()
+                    .contains(table_name)
+            })
+            .map(|(_, sql)| *sql)
+            .collect::<Vec<_>>()
+            .join(";");
+
+        Ok(sql)
+    }
+
+    pub async fn drop_tables_sql(&self) -> Result<String, Error> {
+        #[derive(Row, Deserialize, Debug)]
+        struct TableName {
+            name: String,
+        }
+
+        let rows: Vec<TableName> = self
+            .db
+            .query(sql!(
+                "select name from sqlite_schema where type = {}",
+                "table"
+            ))
+            .await?;
+        let sql = rows
+            .iter()
+            .filter(|table_name| {
+                !self
+                    .db
+                    .schema
+                    .tables
+                    .iter()
+                    .map(|(name, _)| String::from(*name))
+                    .collect::<Vec<_>>()
+                    .contains(&table_name.name)
+            })
+            .map(|tn| format!(r#"drop table "{}""#, tn.name))
+            .collect::<Vec<_>>()
+            .join(";");
+
+        Ok(sql)
     }
 }
 
@@ -342,19 +486,17 @@ impl Query {
         .into()
     }
 
-    pub async fn all<T: DeserializeOwned + Send + Sync + 'static>(self) -> Result<Vec<T>, Error>
+    pub async fn all<T>(self) -> Result<Vec<T>, Error>
     where
-        T: Row,
+        T: DeserializeOwned + Send + Sync + 'static,
     {
         let rows = rows(&self.connection, self.sql()).await?;
         Ok(rows)
     }
 
-    pub async fn prepare<T: DeserializeOwned + Send + Sync + 'static>(
-        self,
-    ) -> Result<Prep<T>, Error>
+    pub async fn prepare<T>(self) -> Result<Prep<T>, Error>
     where
-        T: Row,
+        T: DeserializeOwned + Send + Sync + 'static,
     {
         let prep = prepare::<T>(&self.connection, self.sql()).await?;
         Ok(prep)
@@ -579,12 +721,16 @@ pub trait Row {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub trait Table {
-    fn new() -> Self;
+    fn new() -> Self
+    where
+        Self: Sized + Clone;
     fn table_name(&self) -> &'static str;
     fn column_names(&self) -> &'static str;
     fn insert_sql(&self) -> &'static str;
     fn update_sql(&self) -> &'static str;
     fn delete_sql(&self) -> &'static str;
+    fn index_names(&self) -> &'static str;
+    fn create_table_sql(&self) -> &'static str;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -707,49 +853,27 @@ pub struct Sql {
     params: Vec<Value>,
 }
 
-macro_rules! sql {
-    ($sql:expr) => {{
-        let clause = $sql;
-        let params = vec![];
-
-        Sql {
-            clause: clause.into(),
-            params
-        }
-    }};
-    ($sql:expr, $($args:expr),*) => {{
-        let clause = format!($sql, $($args.to_sql(),)*);
-        let params = vec![
-        $($args.to_sql(),)*
-        ].into_iter().filter(|arg| match arg {
-            Value::Text(_) => true,
-            Value::Real(_) => true,
-            Value::Integer(_) => true,
-            Value::Blob(_) => true,
-            _ => false
-        }).collect::<Vec<_>>();
-
-        Sql {
-            clause: clause.into(),
-            params
-        }
-    }};
+#[derive(Clone, Debug)]
+pub struct Schema {
+    tables: Vec<(&'static str, &'static str)>,
+    columns: Vec<&'static str>,
+    indices: Vec<&'static str>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
     use rizz::{
-        and, connect, count, db, eq, or, star, Database, Error, Integer, Row, Sql, Table, ToSql,
-        Value,
+        and, connect, count, eq, or, star, Database, Error, Integer, Row, Sql, Table, Value,
     };
     use serde::Deserialize;
 
     type TestResult<T> = Result<T, Error>;
 
     async fn test_db() -> TestResult<Database> {
-        let conn = connect(":memory:").await?;
-        let db = db(conn);
+        let accounts = Accounts::new();
+        let schema = schema!(accounts);
+        let db = connect(":memory:").await?.db(schema);
 
         Ok(db)
     }
@@ -837,7 +961,7 @@ mod tests {
     async fn crud_works() -> TestResult<()> {
         let db = test_db().await?;
 
-        let _ = db.execute_batch(sql!("create table accounts (id)")).await?;
+        let _ = db.execute_batch("create table accounts (id)").await?;
 
         let accounts = Accounts::new();
         let inserted: Account = db
@@ -889,7 +1013,46 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Row, Deserialize, PartialEq, Debug)]
+    #[tokio::test]
+    async fn migrating_tables_works() -> TestResult<()> {
+        #[derive(Deserialize)]
+        struct TableName {
+            name: String,
+        }
+
+        let accounts = Accounts::new();
+        let schema = schema!(accounts);
+        let conn = connect(":memory:").await?;
+        let db = conn.clone().db(schema);
+        let migrations = db.clone().migrator().dry_run(true).migrate().await?;
+        assert_eq!(
+            r#"create table "accounts" (id integer primary key)"#,
+            migrations
+        );
+
+        let _ = db.clone().migrator().migrate().await?;
+        let tables: Vec<TableName> = db
+            .query(sql!("select name from sqlite_schema where type = 'table'"))
+            .await?;
+        let tables = tables.into_iter().map(|x| x.name).collect::<Vec<_>>();
+        assert_eq!(vec!["accounts"], tables);
+
+        let new_schema = schema!();
+        let db = Database::new(conn, new_schema);
+        let migrations = db.clone().migrator().dry_run(true).migrate().await?;
+        assert_eq!(r#"drop table "accounts""#, migrations);
+
+        let _ = db.clone().migrator().migrate().await?;
+        let num_tables = db
+            .query::<TableName>(sql!("select name from sqlite_schema where type = 'table'"))
+            .await?
+            .len();
+        assert_eq!(0, num_tables);
+
+        Ok(())
+    }
+
+    #[derive(Deserialize, PartialEq, Debug)]
     struct RowCount {
         count: i64,
     }
