@@ -2,28 +2,23 @@
 //!
 extern crate self as rizz;
 
-pub use rizz_macros::{Row, Table};
+pub use rizz_macros::Table;
 
-#[cfg(not(target_arch = "wasm32"))]
 use rusqlite::OpenFlags;
-#[cfg(not(target_arch = "wasm32"))]
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
-#[cfg(not(target_arch = "wasm32"))]
+use serde::{Deserialize, Serialize};
 use std::{marker::PhantomData, sync::Arc};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_macros)]
 macro_rules! schema {
     ($($args:ident),*) => {{
         rizz::Schema {
             tables: vec![$(($args.table_name(),$args.create_table_sql()),)*],
-            columns: vec![$($args.column_names(),)*],
             indices: vec![$(($args.index_names(),$args.create_indices_sql()),)*]
         }
     }}
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 macro_rules! sql {
     ($sql:expr) => {{
         let clause = $sql;
@@ -31,7 +26,7 @@ macro_rules! sql {
 
         rizz::Sql {
             clause: clause.into(),
-            params
+            params,
         }
     }};
     ($sql:expr, $($args:expr),*) => {{
@@ -54,17 +49,14 @@ macro_rules! sql {
     }};
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub async fn connect(path: &str) -> Result<Connection, Error> {
     Connection::new(path).open().await
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub fn connection(path: &str) -> Connection {
     Connection::new(path)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Connection {
     path: Arc<str>,
@@ -73,7 +65,6 @@ pub struct Connection {
     pragma: Option<String>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Connection {
     pub fn new(path: &str) -> Self {
         Self {
@@ -162,14 +153,12 @@ impl Connection {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct Database {
     connection: tokio_rusqlite::Connection,
     schema: Schema,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Database {
     fn new(connection: Connection, schema: Schema) -> Self {
         Self {
@@ -178,16 +167,24 @@ impl Database {
         }
     }
 
-    pub fn select(&self, columns: Arc<str>) -> Query {
-        Query::new(self.connection.clone()).select(columns)
+    pub fn select(&self) -> Query {
+        Query::new(self.connection.clone()).select()
+    }
+
+    pub fn select_with(&self, sql: Sql) -> Query {
+        Query::new(self.connection.clone()).select_with(sql)
+    }
+
+    pub fn count(&self) -> Query {
+        Query::new(self.connection.clone()).count()
     }
 
     pub fn from(&self, table: impl Table) -> Query {
         Query::new(self.connection.clone()).from(table)
     }
 
-    pub fn insert(&self, table: impl Table) -> Query {
-        Query::new(self.connection.clone()).insert(table)
+    pub fn insert_into(&self, table: impl Table) -> Query {
+        Query::new(self.connection.clone()).insert_into(table)
     }
 
     pub fn update(&self, table: impl Table) -> Query {
@@ -219,18 +216,17 @@ impl Database {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub struct Migrator {
     db: Database,
     dry_run: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Migrator {
     fn new(db: Database) -> Self {
         Migrator { db, dry_run: false }
     }
 
+    #[allow(unused)]
     fn dry_run(mut self, arg: bool) -> Self {
         self.dry_run = arg;
         self
@@ -268,7 +264,7 @@ impl Migrator {
     }
 
     pub async fn drop_tables_sql(&self) -> Result<String, Error> {
-        #[derive(Row, Deserialize, Debug)]
+        #[derive(Deserialize, Debug)]
         struct Table {
             name: String,
         }
@@ -297,7 +293,7 @@ impl Migrator {
     }
 
     pub async fn drop_indices_sql(&self) -> Result<String, Error> {
-        #[derive(Row, Deserialize, Debug)]
+        #[derive(Deserialize, Debug)]
         struct Index {
             name: String,
         }
@@ -336,7 +332,6 @@ impl Migrator {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalMode {
     Delete,
@@ -348,7 +343,6 @@ pub enum JournalMode {
     Off,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Synchronous {
     Off,
@@ -358,7 +352,6 @@ pub enum Synchronous {
     Extra,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Value {
     fn to_sql(&self) -> &dyn rusqlite::ToSql {
         match self {
@@ -367,11 +360,51 @@ impl Value {
             Value::Real(r) => r,
             Value::Integer(i) => i,
             Value::Lit(s) => s,
+            Value::Null => todo!(),
         }
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+impl rusqlite::ToSql for Value {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        use rusqlite::types::{ToSqlOutput, ValueRef};
+        match self {
+            Value::Text(s) => Ok(s.as_bytes().into()),
+            Value::Blob(b) => Ok(ToSqlOutput::Borrowed(b.as_slice().into())),
+            Value::Real(r) => Ok(ToSqlOutput::Borrowed(ValueRef::Real(*r))),
+            Value::Integer(i) => Ok(ToSqlOutput::Borrowed(ValueRef::Integer(*i))),
+            Value::Lit(s) => Ok(ToSqlOutput::Borrowed(s.as_bytes().into())),
+            Value::Null => todo!(),
+        }
+    }
+}
+
+impl From<rusqlite::types::ToSqlOutput<'_>> for Value {
+    fn from(value: rusqlite::types::ToSqlOutput) -> Self {
+        match value {
+            rusqlite::types::ToSqlOutput::Borrowed(b) => match b {
+                rusqlite::types::ValueRef::Null => Value::Null,
+                rusqlite::types::ValueRef::Integer(i) => Value::Integer(i),
+                rusqlite::types::ValueRef::Real(r) => Value::Real(r),
+                rusqlite::types::ValueRef::Text(t) => Value::Text(
+                    std::str::from_utf8(t)
+                        .expect("Expected a utf8 encoded string")
+                        .into(),
+                ),
+                rusqlite::types::ValueRef::Blob(b) => Value::Blob(b.into()),
+            },
+            rusqlite::types::ToSqlOutput::Owned(o) => match o {
+                rusqlite::types::Value::Null => Value::Null,
+                rusqlite::types::Value::Integer(i) => Value::Integer(i),
+                rusqlite::types::Value::Real(val) => Value::Real(val),
+                rusqlite::types::Value::Text(val) => Value::Text(val.into()),
+                rusqlite::types::Value::Blob(val) => Value::Blob(val),
+            },
+            _ => todo!(),
+        }
+    }
+}
+
 async fn execute(connection: &tokio_rusqlite::Connection, sql: Sql) -> Result<usize, Error> {
     let results = connection
         .call(move |conn| {
@@ -387,7 +420,6 @@ async fn execute(connection: &tokio_rusqlite::Connection, sql: Sql) -> Result<us
     Ok(results)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn rows<T: DeserializeOwned + Send + 'static>(
     connection: &tokio_rusqlite::Connection,
     sql: Sql,
@@ -413,7 +445,6 @@ async fn rows<T: DeserializeOwned + Send + 'static>(
     Ok(results)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn prepare<T: DeserializeOwned + Send + Sync + 'static>(
     connection: &tokio_rusqlite::Connection,
     sql: Sql,
@@ -435,7 +466,6 @@ async fn prepare<T: DeserializeOwned + Send + Sync + 'static>(
     Ok(prep)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Query {
     fn new(connection: tokio_rusqlite::Connection) -> Self {
         Self {
@@ -454,8 +484,8 @@ impl Query {
         }
     }
 
-    pub fn select(mut self, columns: Arc<str>) -> Self {
-        self.select = Some(format!("select {}", columns).into());
+    pub fn select(mut self) -> Self {
+        self.select = Some(format!("select *").into());
 
         self
     }
@@ -479,14 +509,14 @@ impl Query {
         self
     }
 
-    pub fn sql(&self) -> Sql {
+    fn sql_statement(&self) -> Sql {
         Sql {
-            clause: self.sql_clause(),
+            clause: self.sql(),
             params: self.values.clone(),
         }
     }
 
-    pub fn sql_clause(&self) -> String {
+    pub fn sql(&self) -> String {
         vec![
             self.select.clone(),
             self.from.clone(),
@@ -511,7 +541,7 @@ impl Query {
     where
         T: DeserializeOwned + Send + Sync + 'static,
     {
-        let rows = rows(&self.connection, self.sql()).await?;
+        let rows = rows(&self.connection, self.sql_statement()).await?;
         Ok(rows)
     }
 
@@ -519,19 +549,41 @@ impl Query {
     where
         T: DeserializeOwned + Send + Sync + 'static,
     {
-        let prep = prepare::<T>(&self.connection, self.sql()).await?;
+        let prep = prepare::<T>(&self.connection, self.sql_statement()).await?;
         Ok(prep)
     }
 
-    pub fn insert(mut self, table: impl Table) -> Self {
+    pub fn insert_into(mut self, table: impl Table) -> Self {
         self.insert_into = Some(table.insert_sql().into());
         self
     }
 
-    pub fn values(mut self, row: impl Row) -> Self {
-        self.values_sql = Some(row.insert_sql().into());
-        self.values = row.values();
-        self
+    fn row_to_named_params(row: impl Serialize) -> Result<Vec<(Arc<str>, Value)>, Error> {
+        let named_params = serde_rusqlite::to_params_named(row)?;
+        named_params
+            .iter()
+            .map(|(name, value)| -> Result<(Arc<str>, Value), Error> {
+                Ok((
+                    name.replacen(":", "", 1).as_str().into(),
+                    value.to_sql()?.into(),
+                ))
+            })
+            .collect()
+    }
+
+    pub fn values(mut self, row: impl Serialize) -> Result<Self, Error> {
+        let named_params = Self::row_to_named_params(row)?;
+        let column_names = named_params
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        self.values = named_params
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        self.values_sql = Some(format!("values ({})", column_names).into());
+        Ok(self)
     }
 
     pub fn update(mut self, table: impl Table) -> Self {
@@ -539,10 +591,19 @@ impl Query {
         self
     }
 
-    pub fn set(mut self, row: impl Row) -> Self {
-        self.set = Some(row.set_sql().into());
-        self.values = row.values();
-        self
+    pub fn set(mut self, row: impl Serialize) -> Result<Self, Error> {
+        let named_params = Self::row_to_named_params(row)?;
+        let set = named_params
+            .iter()
+            .map(|(name, _)| format!("{} = ?", name))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.set = Some(format!("set {}", set).into());
+        self.values = named_params
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        Ok(self)
     }
 
     pub fn delete(mut self, table: impl Table) -> Self {
@@ -550,29 +611,38 @@ impl Query {
         self
     }
 
-    pub async fn returning<T: Row + DeserializeOwned + Send + Sync + 'static>(
+    pub async fn returning<T: Serialize + DeserializeOwned + Send + Sync + 'static>(
         mut self,
-        columns: Arc<str>,
     ) -> Result<T, Error> {
-        self.returning = Some(format!("returning {}", columns).into());
-        let rows = rows::<T>(&self.connection, self.sql()).await?;
+        self.returning = Some("returning *".into());
+        let rows = rows::<T>(&self.connection, self.sql_statement()).await?;
         if let Some(row) = rows.into_iter().nth(0) {
             Ok(row)
         } else {
             Err(Error::InsertError(format!(
                 "failed to insert {}",
-                self.sql().clause
+                self.sql_statement().clause
             )))
         }
     }
 
     pub async fn rows_affected(self) -> Result<usize, Error> {
-        let rows_affected = execute(&self.connection, self.sql()).await?;
+        let rows_affected = execute(&self.connection, self.sql_statement()).await?;
         Ok(rows_affected)
+    }
+
+    fn select_with(mut self, sql: Sql) -> Query {
+        self.select = Some(format!("select {}", sql.clause).into());
+        self
+    }
+
+    fn count(mut self) -> Query {
+        self.select = Some(format!("select count(*)").into());
+        self
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused)]
 #[derive(Clone, Debug)]
 pub struct Prep<T>
 where
@@ -583,7 +653,7 @@ where
     phantom: PhantomData<T>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused)]
 impl<T> Prep<T>
 where
     T: DeserializeOwned + Send + Sync + 'static,
@@ -594,7 +664,6 @@ where
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Query {
     connection: tokio_rusqlite::Connection,
@@ -698,6 +767,7 @@ pub enum Value {
     Blob(Vec<u8>),
     Real(f64),
     Integer(i64),
+    Null,
 }
 
 impl From<String> for Value {
@@ -736,13 +806,6 @@ impl From<Vec<u8>> for Value {
     }
 }
 
-pub trait Row {
-    fn values(&self) -> Vec<Value>;
-    fn insert_sql(&self) -> &'static str;
-    fn set_sql(&self) -> &'static str;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 pub trait Table {
     fn new() -> Self
     where
@@ -769,9 +832,10 @@ pub enum Error {
     MissingFrom,
     #[error("error inserting record {0}")]
     InsertError(String),
+    #[error("error converting value {0}")]
+    SqlConversion(String),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<tokio_rusqlite::Error> for Error {
     fn from(value: tokio_rusqlite::Error) -> Self {
         match value {
@@ -783,7 +847,22 @@ impl From<tokio_rusqlite::Error> for Error {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+impl From<serde_rusqlite::Error> for Error {
+    fn from(value: serde_rusqlite::Error) -> Self {
+        match value {
+            serde_rusqlite::Error::Unsupported(_) => todo!(),
+            serde_rusqlite::Error::ValueTooLarge(_) => todo!(),
+            serde_rusqlite::Error::Serialization(_) => todo!(),
+            serde_rusqlite::Error::Deserialization {
+                column: _,
+                message: _,
+            } => todo!(),
+            serde_rusqlite::Error::Rusqlite(_) => todo!(),
+            serde_rusqlite::Error::ColumnNamesNotAvailable => todo!(),
+        }
+    }
+}
+
 impl From<rusqlite::Error> for Error {
     fn from(value: rusqlite::Error) -> Self {
         match value {
@@ -801,7 +880,7 @@ impl From<rusqlite::Error> for Error {
             rusqlite::Error::InvalidColumnName(_) => todo!(),
             rusqlite::Error::InvalidColumnType(_, _, _) => todo!(),
             rusqlite::Error::StatementChangedRows(_) => todo!(),
-            rusqlite::Error::ToSqlConversionFailure(_) => todo!(),
+            rusqlite::Error::ToSqlConversionFailure(err) => Self::SqlConversion(err.to_string()),
             rusqlite::Error::InvalidQuery => todo!(),
             rusqlite::Error::MultipleStatement => todo!(),
             rusqlite::Error::InvalidParameterCount(_, _) => todo!(),
@@ -810,7 +889,6 @@ impl From<rusqlite::Error> for Error {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -820,89 +898,74 @@ impl std::fmt::Display for Value {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub trait ToSql {
     fn to_sql(&self) -> Value;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for &'static str {
     fn to_sql(&self) -> Value {
         Value::Text(self.to_owned().into())
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for i64 {
     fn to_sql(&self) -> Value {
         Value::Integer(*self)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for f64 {
     fn to_sql(&self) -> Value {
         Value::Real(*self)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Vec<u8> {
     fn to_sql(&self) -> Value {
         Value::Blob(self.clone())
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Integer {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Blob {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Real {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ToSql for Text {
     fn to_sql(&self) -> Value {
         Value::Lit(self.0)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Sql {
     clause: String,
     params: Vec<Value>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Schema {
     tables: Vec<(&'static str, &'static str)>,
-    columns: Vec<&'static str>,
     indices: Vec<(&'static str, &'static str)>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
-    use rizz::{
-        and, connect, count, eq, or, star, Database, Error, Integer, Row, Sql, Table, Value,
-    };
-    use serde::Deserialize;
+    use rizz::{and, connect, eq, or, Database, Error, Integer, Sql, Table, Value};
+    use serde::{Deserialize, Serialize};
 
     use crate::{Index, Text};
 
@@ -963,12 +1026,12 @@ mod tests {
         let db = test_db().await?;
         let accounts = Accounts::new();
 
-        let query = db.select(star()).from(accounts).r#where(or(
+        let query = db.select().from(accounts).r#where(or(
             and(eq(accounts.id, "1"), eq(accounts.id, "1".to_owned())),
             eq(accounts.id, 1),
         ));
 
-        let query2 = db.select(star()).from(accounts).r#where(sql!(
+        let query2 = db.select().from(accounts).r#where(sql!(
             "(({} = {} and {} = {}) or {} = {})",
             accounts.id,
             "1",
@@ -978,10 +1041,10 @@ mod tests {
             1
         ));
 
-        assert_eq!(query.sql_clause(), query2.sql_clause());
+        assert_eq!(query.sql(), query2.sql());
 
         assert_eq!(
-            query.sql_clause(),
+            query.sql(),
             r#"select * from "accounts" where (("accounts"."id" = ? and "accounts"."id" = ?) or "accounts"."id" = ?)"#
         );
         assert_eq!(
@@ -1000,57 +1063,62 @@ mod tests {
     async fn crud_works() -> TestResult<()> {
         let db = test_db().await?;
         let accounts = Accounts::new();
-        let inserted: Account = db
-            .insert(accounts)
-            .values(Account {
-                id: 1,
-                name: "".into(),
-            })
-            .returning(star())
-            .await?;
+        let account = Account {
+            id: 1,
+            name: "inserted".into(),
+        };
+        let insert_query = db.insert_into(accounts).values(account)?;
+        assert_eq!(
+            "insert into \"accounts\" (id,name) values (?,?)",
+            insert_query.sql()
+        );
+        let mut inserted: Account = insert_query.returning().await?;
 
         assert_eq!(inserted.id, 1);
+        assert_eq!(inserted.name, "inserted");
 
-        let new_account = Account {
-            id: 2,
-            name: "".into(),
-        };
-        let updated: Account = db
+        inserted.name = "updated".into();
+        let update_query = db
             .update(accounts)
-            .set(new_account)
-            .r#where(eq(accounts.id, 1))
-            .returning(star())
-            .await?;
+            .set(inserted)?
+            .r#where(eq(accounts.id, 1));
 
-        assert_eq!(updated.id, 2);
+        assert_eq!(
+            update_query.sql(),
+            "update \"accounts\" set id = ?,name = ? where \"accounts\".\"id\" = ?"
+        );
+
+        let updated: Account = update_query.returning().await?;
+
+        assert_eq!(updated.id, 1);
+        assert_eq!(updated.name, "updated");
 
         let rows: Vec<Account> = db
-            .select(star())
+            .select()
             .from(accounts)
-            .r#where(eq(accounts.id, 2))
+            .r#where(eq(accounts.id, 1))
             .all()
             .await?;
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows.iter().nth(0).unwrap().id, 2);
+        assert_eq!(rows.iter().nth(0).unwrap().id, 1);
 
         let rows_affected = db
             .delete(accounts)
-            .r#where(eq(accounts.id, 2))
+            .r#where(eq(accounts.id, 1))
             .rows_affected()
             .await?;
 
         assert_eq!(rows_affected, 1);
 
         let num_rows: Vec<RowCount> = db
-            .select(count(accounts.id))
+            .count()
             .from(accounts)
-            .r#where(eq(accounts.id, 2))
+            .r#where(eq(accounts.id, 1))
             .all()
             .await?;
 
-        assert_ne!(num_rows.iter().nth(0), None);
-        assert_eq!(num_rows.iter().nth(0).unwrap().count, 0);
+        assert_eq!(num_rows.len(), 0);
 
         Ok(())
     }
@@ -1109,12 +1177,13 @@ mod tests {
         count: i64,
     }
 
-    #[derive(Row, Deserialize)]
+    #[derive(Serialize, Deserialize)]
     struct Account {
         id: i64,
         name: String,
     }
 
+    #[allow(unused)]
     #[derive(Table, Clone, Copy)]
     #[rizz(table = "accounts")]
     struct Accounts {

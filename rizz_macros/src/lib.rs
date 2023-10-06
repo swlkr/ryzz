@@ -213,63 +213,6 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
     })
 }
 
-#[proc_macro_derive(Row, attributes(rizz))]
-pub fn row(s: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(s as DeriveInput);
-    match row_macro(input) {
-        Ok(s) => s.to_token_stream().into(),
-        Err(e) => e.to_compile_error().into(),
-    }
-}
-
-fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
-    let struct_name = input.ident;
-    let col_idents = match input.data {
-        syn::Data::Struct(ref data) => data
-            .fields
-            .iter()
-            .map(|field| {
-                field
-                    .ident
-                    .as_ref()
-                    .expect("Struct fields should have names")
-            })
-            .collect::<Vec<_>>(),
-        _ => unimplemented!(),
-    };
-    let insert_sql = col_idents.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let insert_sql = format!("values ({})", insert_sql);
-    let values = col_idents
-        .iter()
-        .map(|ident| {
-            quote! {
-                rizz::Value::from(self.#ident.clone())
-            }
-        })
-        .collect::<Vec<_>>();
-    let set_sql = col_idents
-        .iter()
-        .map(|ident| format!("{} = ?", ident.to_string()))
-        .collect::<Vec<_>>()
-        .join(",");
-    let set_sql = format!("set {}", set_sql);
-    Ok(quote! {
-        impl rizz::Row for #struct_name {
-            fn values(&self) -> Vec<rizz::Value> {
-                vec![#(#values,)*]
-            }
-
-            fn insert_sql(&self) -> &'static str {
-                #insert_sql
-            }
-
-            fn set_sql(&self) -> &'static str {
-                #set_sql
-            }
-        }
-    })
-}
-
 impl Parse for RizzAttr {
     fn parse(input: syn::parse::ParseStream) -> Result<Self> {
         let mut rizzle_attr = RizzAttr::default();
@@ -307,11 +250,11 @@ impl Parse for RizzAttr {
                                 "one" => {
                                     rizzle_attr.rel = Some(Rel::One(lit_str.clone()));
                                 }
-                                _ => unimplemented!(),
+                                _ => {}
                             }
                         }
                     }
-                    _ => unimplemented!(),
+                    _ => {}
                 },
                 Expr::Path(path) => match path.path.segments.len() {
                     1 => match path
@@ -326,7 +269,7 @@ impl Parse for RizzAttr {
                         "not_null" => rizzle_attr.not_null = true,
                         "primary_key" => rizzle_attr.primary_key = true,
                         "unique" => rizzle_attr.unique = true,
-                        _ => unimplemented!(),
+                        _ => {}
                     },
                     _ => {}
                 },
