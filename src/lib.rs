@@ -3,13 +3,12 @@
 extern crate self as rizz;
 
 pub use rizz_macros::Table;
-
 use rusqlite::OpenFlags;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::{marker::PhantomData, sync::Arc};
 
-#[allow(unused_macros)]
+#[macro_export]
 macro_rules! schema {
     ($($args:ident),*) => {{
         rizz::Schema {
@@ -681,16 +680,16 @@ pub struct Query {
 }
 
 #[derive(Clone, Copy)]
-pub struct Text(&'static str);
+pub struct Text(pub &'static str);
 
 #[derive(Clone, Copy)]
-pub struct Blob(&'static str);
+pub struct Blob(pub &'static str);
 
 #[derive(Clone, Copy)]
-pub struct Integer(&'static str);
+pub struct Integer(pub &'static str);
 
 #[derive(Clone, Copy)]
-pub struct Real(&'static str);
+pub struct Real(pub &'static str);
 
 pub type Index = &'static str;
 
@@ -834,6 +833,8 @@ pub enum Error {
     InsertError(String),
     #[error("error converting value {0}")]
     SqlConversion(String),
+    #[error("could not find the row")]
+    RowNotFound,
 }
 
 impl From<tokio_rusqlite::Error> for Error {
@@ -958,8 +959,8 @@ pub struct Sql {
 
 #[derive(Clone, Debug)]
 pub struct Schema {
-    tables: Vec<(&'static str, &'static str)>,
-    indices: Vec<(&'static str, &'static str)>,
+    pub tables: Vec<(&'static str, &'static str)>,
+    pub indices: Vec<(&'static str, &'static str)>,
 }
 
 #[cfg(test)]

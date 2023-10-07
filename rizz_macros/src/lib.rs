@@ -206,8 +206,8 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         }
 
         impl rizz::ToSql for #struct_name {
-            fn to_sql(&self) -> Value {
-                Value::Lit(self.table_name())
+            fn to_sql(&self) -> rizz::Value {
+                rizz::Value::Lit(self.table_name())
             }
         }
     })
