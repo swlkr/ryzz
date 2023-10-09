@@ -6,6 +6,7 @@ pub use rizz_macros::Table;
 use rusqlite::OpenFlags;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::rc::Rc;
 use std::{marker::PhantomData, sync::Arc};
 
 #[macro_export]
@@ -166,34 +167,6 @@ impl Database {
         }
     }
 
-    pub fn select(&self) -> Query {
-        Query::new(self.connection.clone()).select()
-    }
-
-    pub fn select_with(&self, sql: Sql) -> Query {
-        Query::new(self.connection.clone()).select_with(sql)
-    }
-
-    pub fn count(&self) -> Query {
-        Query::new(self.connection.clone()).count()
-    }
-
-    pub fn from(&self, table: impl Table) -> Query {
-        Query::new(self.connection.clone()).from(table)
-    }
-
-    pub fn insert_into(&self, table: impl Table) -> Query {
-        Query::new(self.connection.clone()).insert_into(table)
-    }
-
-    pub fn update(&self, table: impl Table) -> Query {
-        Query::new(self.connection.clone()).update(table)
-    }
-
-    pub fn delete(&self, table: impl Table) -> Query {
-        Query::new(self.connection.clone()).delete(table)
-    }
-
     pub async fn execute_batch(&self, sql: &str) -> Result<(), Error> {
         let sql: Arc<str> = sql.into();
         let _ = self
@@ -210,7 +183,7 @@ impl Database {
         rows::<T>(&self.connection, sql).await
     }
 
-    pub fn migrator(self) -> Migrator {
+    pub fn migrator(&self) -> Migrator {
         Migrator::new(self)
     }
 }
@@ -221,12 +194,14 @@ pub struct Migrator {
 }
 
 impl Migrator {
-    fn new(db: Database) -> Self {
-        Migrator { db, dry_run: false }
+    fn new(db: &Database) -> Self {
+        Migrator {
+            db: db.clone(),
+            dry_run: false,
+        }
     }
 
-    #[allow(unused)]
-    fn dry_run(mut self, arg: bool) -> Self {
+    pub fn dry_run(mut self, arg: bool) -> Self {
         self.dry_run = arg;
         self
     }
@@ -252,7 +227,7 @@ impl Migrator {
         }
     }
 
-    pub fn create_tables_sql(&self) -> String {
+    fn create_tables_sql(&self) -> String {
         self.db
             .schema
             .tables
@@ -262,36 +237,39 @@ impl Migrator {
             .join(";")
     }
 
-    pub async fn drop_tables_sql(&self) -> Result<String, Error> {
+    async fn drop_tables_sql(&self) -> Result<String, Error> {
         #[derive(Deserialize, Debug)]
         struct Table {
             name: String,
         }
 
-        let rows: Vec<Table> = self
-            .db
+        let Self { db, .. } = self;
+
+        let rows: Vec<Table> = db
             .query(sql!("select name from sqlite_schema where type = 'table'"))
             .await?;
-        let sql = rows
+        let db_table_names: Vec<Rc<str>> = rows
+            .into_iter()
+            .map(|row| format!(r#""{}""#, row.name).into())
+            .collect();
+        let schema_table_names: Vec<Rc<str>> = db
+            .schema
+            .tables
             .iter()
-            .filter(|table_name| {
-                !self
-                    .db
-                    .schema
-                    .tables
-                    .iter()
-                    .map(|(name, _)| String::from(*name))
-                    .collect::<Vec<_>>()
-                    .contains(&table_name.name)
-            })
-            .map(|tn| format!(r#"drop table "{}""#, tn.name))
+            .map(|(name, _)| *name)
+            .map(|name| name.into())
+            .collect();
+        let sql = schema_table_names
+            .into_iter()
+            .filter(|name| !db_table_names.contains(&name))
+            .map(|name| format!(r#"drop table "{}""#, name))
             .collect::<Vec<_>>()
             .join(";");
 
         Ok(sql)
     }
 
-    pub async fn drop_indices_sql(&self) -> Result<String, Error> {
+    async fn drop_indices_sql(&self) -> Result<String, Error> {
         #[derive(Deserialize, Debug)]
         struct Index {
             name: String,
@@ -299,7 +277,7 @@ impl Migrator {
 
         let rows: Vec<Index> = self
             .db
-            .query(sql!("select name from sqlite_schema where type = 'index'"))
+            .query(sql!("select name from sqlite_schema where type = 'index' and name not like 'sqlite_autoindex_%'"))
             .await?;
         let sql = rows
             .iter()
@@ -320,7 +298,7 @@ impl Migrator {
         Ok(sql)
     }
 
-    pub fn create_indices_sql(&self) -> String {
+    fn create_indices_sql(&self) -> String {
         self.db
             .schema
             .indices
@@ -466,9 +444,8 @@ async fn prepare<T: DeserializeOwned + Send + Sync + 'static>(
 }
 
 impl Query {
-    fn new(connection: tokio_rusqlite::Connection) -> Self {
+    pub fn new() -> Self {
         Self {
-            connection,
             select: None,
             from: None,
             r#where: None,
@@ -536,23 +513,23 @@ impl Query {
         .into()
     }
 
-    pub async fn all<T>(self) -> Result<Vec<T>, Error>
+    pub async fn all<T>(self, db: &Database) -> Result<Vec<T>, Error>
     where
         T: DeserializeOwned + Send + Sync + 'static,
     {
-        let rows = rows(&self.connection, self.sql_statement()).await?;
+        let rows = rows(&db.connection, self.sql_statement()).await?;
         Ok(rows)
     }
 
-    pub async fn prepare<T>(self) -> Result<Prep<T>, Error>
+    pub async fn prepare<T>(self, db: &Database) -> Result<Prep<T>, Error>
     where
         T: DeserializeOwned + Send + Sync + 'static,
     {
-        let prep = prepare::<T>(&self.connection, self.sql_statement()).await?;
+        let prep = prepare::<T>(&db.connection, self.sql_statement()).await?;
         Ok(prep)
     }
 
-    pub fn insert_into(mut self, table: impl Table) -> Self {
+    pub fn insert(mut self, table: impl Table) -> Self {
         self.insert_into = Some(table.insert_sql().into());
         self
     }
@@ -612,9 +589,10 @@ impl Query {
 
     pub async fn returning<T: Serialize + DeserializeOwned + Send + Sync + 'static>(
         mut self,
+        db: &Database,
     ) -> Result<T, Error> {
         self.returning = Some("returning *".into());
-        let rows = rows::<T>(&self.connection, self.sql_statement()).await?;
+        let rows = rows::<T>(&db.connection, self.sql_statement()).await?;
         if let Some(row) = rows.into_iter().nth(0) {
             Ok(row)
         } else {
@@ -625,20 +603,36 @@ impl Query {
         }
     }
 
-    pub async fn rows_affected(self) -> Result<usize, Error> {
-        let rows_affected = execute(&self.connection, self.sql_statement()).await?;
+    pub async fn rows_affected(self, db: &Database) -> Result<usize, Error> {
+        let rows_affected = execute(&db.connection, self.sql_statement()).await?;
         Ok(rows_affected)
     }
 
-    fn select_with(mut self, sql: Sql) -> Query {
+    pub fn select_with(mut self, sql: Sql) -> Query {
         self.select = Some(format!("select {}", sql.clause).into());
         self
     }
 
-    fn count(mut self) -> Query {
+    pub fn count(mut self) -> Query {
         self.select = Some(format!("select count(*)").into());
         self
     }
+}
+
+pub fn select() -> Query {
+    Query::new().select()
+}
+
+pub fn insert(table: impl Table) -> Query {
+    Query::new().insert(table)
+}
+
+pub fn delete(table: impl Table) -> Query {
+    Query::new().delete(table)
+}
+
+pub fn placeholder() -> &'static str {
+    "?"
 }
 
 #[allow(unused)]
@@ -657,15 +651,27 @@ impl<T> Prep<T>
 where
     T: DeserializeOwned + Send + Sync + 'static,
 {
-    async fn all(&self) -> Result<Vec<T>, Error> {
-        let rows = rows::<T>(&self.connection, self.sql.clone()).await?;
+    pub async fn all(&self, params: Vec<Value>) -> Result<Vec<T>, Error> {
+        let sql = Sql {
+            clause: self.sql.clause.clone(),
+            params,
+        };
+        let rows = rows::<T>(&self.connection, sql).await?;
         Ok(rows)
+    }
+
+    pub async fn one(&self, params: Vec<Value>) -> Result<T, Error> {
+        let sql = Sql {
+            clause: self.sql.clause.clone(),
+            params,
+        };
+        let rows = rows::<T>(&self.connection, sql).await?;
+        rows.into_iter().nth(0).ok_or(Error::RowNotFound)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Query {
-    connection: tokio_rusqlite::Connection,
     select: Option<Arc<str>>,
     from: Option<Arc<str>>,
     r#where: Option<Arc<str>>,
@@ -772,6 +778,12 @@ pub enum Value {
 impl From<String> for Value {
     fn from(value: String) -> Self {
         Value::Text(value.into())
+    }
+}
+
+impl From<&String> for Value {
+    fn from(value: &String) -> Self {
+        Value::Text(value.clone().into())
     }
 }
 

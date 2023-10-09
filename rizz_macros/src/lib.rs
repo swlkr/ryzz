@@ -129,7 +129,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                 .expect("#[rizz(columns = \"\")] on index requires at least one column");
             let unique = match rizz_attr.unique {
                 true => " unique ",
-                false => "",
+                false => " ",
             };
             format!(
                 "create{}index if not exists {} on {} ({})",
