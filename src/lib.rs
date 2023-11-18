@@ -781,19 +781,17 @@ pub struct Query {
     order: Option<Arc<str>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Text(pub &'static str);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Blob(pub &'static str);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Integer(pub &'static str);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Real(pub &'static str);
-
-pub type Index = &'static str;
 
 pub trait ToColumn {
     fn to_column(&self) -> &'static str;
@@ -856,6 +854,13 @@ pub fn or(left: Sql, right: Sql) -> Sql {
 pub fn eq(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     Sql {
         clause: format!("{} = ?", left.to_column()),
+        params: vec![right.into()],
+    }
+}
+
+pub fn like(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+    Sql {
+        clause: format!("{} like ?", left.to_column()),
         params: vec![right.into()],
     }
 }
