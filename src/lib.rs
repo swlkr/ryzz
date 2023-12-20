@@ -200,11 +200,11 @@ impl Database {
         Query::new(self.clone()).select()
     }
 
-    pub fn insert(&self, table: impl Table) -> Query {
+    pub fn insert(&self, table: &impl Table) -> Query {
         Query::new(self.clone()).insert(table)
     }
 
-    pub fn delete_from(&self, table: impl Table) -> Query {
+    pub fn delete_from(&self, table: &impl Table) -> Query {
         Query::new(self.clone()).delete(table)
     }
 
@@ -288,7 +288,7 @@ impl Migrator {
 
     async fn migrations(&self) -> Result<Vec<Migration>, Error> {
         let migrations = Migrations::new();
-        let rows: Vec<Migration> = self.db.select().from(migrations).all().await?;
+        let rows: Vec<Migration> = self.db.select().from(&migrations).all().await?;
         Ok(rows)
     }
 
@@ -296,7 +296,7 @@ impl Migrator {
         let migrations = Migrations::new();
         let _row: Migration = self
             .db
-            .insert(migrations)
+            .insert(&migrations)
             .values(migration)?
             .returning()
             .await?;
@@ -355,7 +355,7 @@ struct Migrations {
     sql: Text,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Migration {
     sql: String,
 }
@@ -521,6 +521,7 @@ impl Query {
             update: None,
             returning: None,
             order: None,
+            group_by: None,
             db,
         }
     }
@@ -531,7 +532,7 @@ impl Query {
         self
     }
 
-    pub fn from(mut self, table: impl Table) -> Self {
+    pub fn from(mut self, table: &impl Table) -> Self {
         self.from = Some(format!("from {}", table.table_name()).into());
 
         self
@@ -559,6 +560,16 @@ impl Query {
         self
     }
 
+    pub fn group_by(mut self, columns: Vec<impl ToColumn>) -> Self {
+        let column_names = columns
+            .iter()
+            .map(|c| c.to_column())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.group_by = Some(format!("group by {}", column_names).into());
+        self
+    }
+
     pub fn limit(mut self, limit: u64) -> Self {
         self.limit = Some(format!("limit {}", limit).into());
         self
@@ -581,6 +592,7 @@ impl Query {
             self.set.clone(),
             self.delete.clone(),
             self.r#where.clone(),
+            self.group_by.clone(),
             self.order.clone(),
             self.returning.clone(),
             self.limit.clone(),
@@ -621,12 +633,14 @@ impl Query {
         Ok(prep)
     }
 
-    pub fn insert(mut self, table: impl Table) -> Self {
+    pub fn insert(mut self, table: &impl Table) -> Self {
         self.insert_into = Some(format!("insert into {}", table.table_name()).into());
         self
     }
 
-    fn row_to_named_params(row: impl Serialize) -> Result<Vec<(Arc<str>, Value)>, Error> {
+    fn row_to_named_params(
+        row: impl Serialize + std::fmt::Debug,
+    ) -> Result<Vec<(Arc<str>, Value)>, Error> {
         let named_params = serde_rusqlite::to_params_named(row)?;
         named_params
             .iter()
@@ -639,7 +653,7 @@ impl Query {
             .collect()
     }
 
-    pub fn values(mut self, row: impl Serialize) -> Result<Self, Error> {
+    pub fn values(mut self, row: impl Serialize + std::fmt::Debug) -> Result<Self, Error> {
         let named_params = Self::row_to_named_params(row)?;
         let column_names = named_params
             .iter()
@@ -673,7 +687,7 @@ impl Query {
         self
     }
 
-    pub fn set(mut self, row: impl Serialize) -> Result<Self, Error> {
+    pub fn set(mut self, row: impl Serialize + std::fmt::Debug) -> Result<Self, Error> {
         let named_params = Self::row_to_named_params(row)?;
         let set = named_params
             .iter()
@@ -689,7 +703,7 @@ impl Query {
         Ok(self)
     }
 
-    pub fn delete(mut self, table: impl Table) -> Self {
+    pub fn delete(mut self, table: &impl Table) -> Self {
         self.delete = Some(format!("delete from {}", table.table_name()).into());
         self
     }
@@ -779,6 +793,7 @@ pub struct Query {
     values: Vec<Value>,
     update: Option<Arc<str>>,
     order: Option<Arc<str>>,
+    group_by: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1149,12 +1164,12 @@ mod tests {
         let db = connection(":memory:").open().await?.database();
         let accounts = Accounts::new();
 
-        let query = db.select().from(accounts).r#where(or(
+        let query = db.select().from(&accounts).r#where(or(
             and(eq(accounts.id, "1"), eq(accounts.id, "1".to_owned())),
             eq(accounts.id, 1),
         ));
 
-        let query2 = db.select().from(accounts).r#where(sql!(
+        let query2 = db.select().from(&accounts).r#where(sql!(
             "(({} = {} and {} = {}) or {} = {})",
             accounts.id,
             "1",
@@ -1192,7 +1207,7 @@ mod tests {
             id: 1,
             name: "inserted".into(),
         };
-        let insert_query = db.insert(accounts).values(account)?;
+        let insert_query = db.insert(&accounts).values(account)?;
         assert_eq!(
             "insert into \"accounts\" (id,name) values (?,?)",
             insert_query.sql()
@@ -1220,7 +1235,7 @@ mod tests {
 
         let rows: Vec<Account> = db
             .select()
-            .from(accounts)
+            .from(&accounts)
             .r#where(eq(accounts.id, 1))
             .order(vec![desc(accounts.id), desc(accounts.name)])
             .all()
@@ -1231,7 +1246,7 @@ mod tests {
         assert_eq!(rows.iter().nth(0).unwrap().name, "updated");
 
         let rows_affected = db
-            .delete_from(accounts)
+            .delete_from(&accounts)
             .r#where(eq(accounts.id, 1))
             .rows_affected()
             .await?;
@@ -1240,7 +1255,7 @@ mod tests {
 
         let RowCount { count } = db
             .count()
-            .from(accounts)
+            .from(&accounts)
             .r#where(eq(accounts.id, 1))
             .first()
             .await?;
