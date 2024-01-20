@@ -100,8 +100,14 @@ async fn main() -> Result<(), rizz::Error> {
     // select id, body from comments
     let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await?;
 
+    #[row]
+    struct CommentWithPost {
+        comments: Comment,
+        posts: Post
+    }
+
     // select * from comments inner join posts on posts.id = comments.post_id
-    let rows: Vec<Comment> = db
+    let rows: Vec<CommentWithPost> = db
         .select(())
         .from(comments)
         .inner_join(posts, on(posts.id, comments.post_id))
