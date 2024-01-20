@@ -7,7 +7,7 @@ rizz is an automatic migration generator and query builder for sqlite for rust. 
 # Install
 
 ```sh
-cargo add rizz_db
+cargo add rizz_db # rizz was already taken on crates.io :(
 ```
 
 # Declare your schema
@@ -16,7 +16,13 @@ cargo add rizz_db
 use rizz::*;
 use serde::Deserialize;
 
-#[table]
+#[database]
+struct Database {
+    posts: Posts,
+    comments: Comments
+}
+
+#[table("posts")]
 struct Posts {
   #[rizz(primary_key)]
   id: Integer,
@@ -25,7 +31,7 @@ struct Posts {
   body: Text
 }
 
-#[table]
+#[table("comments")]
 struct Comments {
     #[rizz(primary_key)]
     id: Integer,
@@ -35,12 +41,6 @@ struct Comments {
 
     #[rizz(references = "posts(id)")]
     post_id: Integer,
-}
-
-#[database("db.sqlite3")]
-struct Database {
-    posts: Posts,
-    comments: Comments
 }
 
 #[row]
@@ -53,8 +53,8 @@ struct Post {
 struct Comment {
     id: u64,
     body: String,
+    #[serde(default)]
     post_id: u64,
-    post_body: Option<String>,
 }
 
 # Connect to your db
@@ -62,17 +62,9 @@ struct Comment {
 #[tokio::main]
 async fn main() -> Result<(), rizz::Error> {
     // automatically migrates tables and columns
-    let db = Database::new().await?;
+    let db = Database::new("db.sqlite3").await?;
 
-    let Database { posts, comments } = &db;
-
-    // add indices like this
-    // technically if you hate auto migrations
-    // you can use this to do them for create/drop table and add/drop column manually
-    db.create(index("posts_id_body_idx").on(posts, (posts.id, posts.body)).unique().collate("nocase").desc().r#where("posts.body is not null"))
-        .create(index("comments_body_idx").on(comments, (comments.post_id)))
-        .migrate()
-        .await?;
+    let Database { posts, comments, .. } = &db;
 
     // Inserting, updating, and deleting rows
 
@@ -86,27 +78,27 @@ async fn main() -> Result<(), rizz::Error> {
         .returning()
         .await?;
 
-    // update posts set body = ?, id = ? where id = ?
-    let rows_affected = db
+    // update posts set body = ?, id = ? where id = ? returning *
+    let updated_post: Post = db
         .update(posts)
         .set(Post {
             body: "post".into(),
             ..inserted_post
         })?
         .r#where(eq(posts.id, 1))
-        .rows_affected()
+        .returning()
         .await?;
 
     // delete from posts where id = ? returning *
-    let deleted_post = db.delete(posts).r#where(eq(posts.id, 1)).returning().await;
+    let deleted_post = db.delete(posts).r#where(eq(posts.id, 1)).returning().await?;
 
     // querying
 
     // select * from comments
-    let rows: Vec<Comment> = db.select(()).from(comments).all().await;
+    let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
     // select id, body from comments
-    let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await;
+    let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await?;
 
     // select * from comments inner join posts on posts.id = comments.post_id
     let rows: Vec<Comment> = db
@@ -114,18 +106,18 @@ async fn main() -> Result<(), rizz::Error> {
         .from(comments)
         .inner_join(posts, on(posts.id, comments.post_id))
         .all()
-        .await;
+        .await?;
 
     // prepared statements
 
     // select * from comments
     let query = db.select(()).from(comments);
 
-    // prepare the query store it in a OnceLock<T> or something
+    // prepare the query
     let prepared = query.prepare_as::<Comment>();
 
     // execute the prepared query later
-    let rows = prepared.all().await?;
+    let rows: Vec<Comment> = prepared.all().await?;
 
     Ok(())
 }
