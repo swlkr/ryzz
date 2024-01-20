@@ -2,20 +2,116 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
 use syn::{
-    parse::Parse, parse_macro_input, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath, Lit, LitStr,
-    PathSegment, Result,
+    parse::Parse, parse::Parser, parse_macro_input, DeriveInput, Expr, ExprAssign, ExprLit,
+    ExprPath, Field, ItemStruct, Lit, LitStr, PathSegment, Result,
 };
 
+#[proc_macro_attribute]
+pub fn row(_args: TokenStream, input: TokenStream) -> TokenStream {
+    let input: TokenStream2 = input.into();
+    let output = quote! {
+        #[derive(Serialize, Deserialize, Debug)]
+        #input
+    };
+
+    output.into()
+}
+
+struct Args {
+    name: LitStr,
+}
+
+impl Parse for Args {
+    fn parse(input: syn::parse::ParseStream) -> Result<Self> {
+        let name = input.parse::<LitStr>()?;
+
+        Ok(Self { name })
+    }
+}
+
+#[proc_macro_attribute]
+pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
+    let mut item_struct = parse_macro_input!(input as ItemStruct);
+    let item_struct1 = item_struct.clone();
+    let table_idents = item_struct1
+        .fields
+        .iter()
+        .map(|Field { ty, .. }| ty)
+        .collect::<Vec<_>>();
+    let initialize_lines = item_struct1
+        .fields
+        .iter()
+        .map(|Field { ty, ident, .. }| {
+            quote! { #ident: #ty::new() }
+        })
+        .collect::<Vec<_>>();
+    match item_struct.fields {
+        syn::Fields::Named(ref mut fields) => fields.named.push(
+            Field::parse_named
+                .parse2(quote! { connection: tokio_rusqlite::Connection })
+                .unwrap(),
+        ),
+        _ => {}
+    };
+
+    let ident = &item_struct.ident;
+
+    let output = quote! {
+        #[derive(Debug, Clone)]
+        #item_struct
+
+        impl Based for #ident {
+            async fn new(connection: rizz::Connection) -> Result<Self, rizz::Error> {
+                let connection = connection.open().await?;
+
+                let db = Self {
+                    connection,
+                    #(#initialize_lines,)*
+                };
+
+                db.migrate().await?;
+
+                Ok(db)
+            }
+
+            fn tables() -> Vec<Box<dyn rizz::Table + 'static>> {
+                vec![#(Box::new(#table_idents::new()),)*]
+            }
+
+            fn connection(&self) -> &tokio_rusqlite::Connection {
+                &self.connection
+            }
+        }
+    };
+
+    output.into()
+}
+
+#[proc_macro_attribute]
+pub fn table(args: TokenStream, input: TokenStream) -> TokenStream {
+    let Args { name: table_name } = parse_macro_input!(args as Args);
+    let input: TokenStream2 = input.into();
+
+    let output = quote! {
+        #[allow(dead_code)]
+        #[derive(Debug, Clone, Copy, Table, Default)]
+        #[rizz(table = #table_name)]
+        #input
+    };
+
+    output.into()
+}
+
 #[proc_macro_derive(Table, attributes(rizz))]
-pub fn table(s: TokenStream) -> TokenStream {
+pub fn table_derive(s: TokenStream) -> TokenStream {
     let input = parse_macro_input!(s as DeriveInput);
-    match table_macro(input) {
+    match table_derive_macro(input) {
         Ok(s) => s.to_token_stream().into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
+fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
     let table_str = input
         .attrs
         .iter()
@@ -98,8 +194,22 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
     let column_def_sql = column_defs.join(",");
     let attrs = attrs
         .iter()
-        .map(|(ident, ty, _)| {
-            let value = format!(r#"{}."{}""#, table_name, ident.to_string());
+        .map(|(ident, ty, attrs)| {
+            let rizz_attr = if let Some(attr) = attrs.iter().nth(0) {
+                attr.parse_args::<RizzAttr>().ok()
+            } else {
+                None
+            };
+
+            let name = match rizz_attr {
+                Some(attr) => match attr.name {
+                    Some(name) => name.value(),
+                    None => ident.to_string(),
+                },
+                None => ident.to_string(),
+            };
+
+            let value = format!(r#"{}."{}""#, table_name, name);
             match ty.into_token_stream().to_string().as_str() {
                 "Integer" => quote! { #ident: Integer(#value) },
                 "Blob" => quote! { #ident: Blob(#value) },
@@ -114,6 +224,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         "create table if not exists {} ({});",
         table_name, column_def_sql
     );
+    let drop_table_sql = format!("drop table if exists {};", table_name);
     Ok(quote! {
         impl rizz::Table for #struct_name {
             fn new() -> Self {
@@ -128,6 +239,10 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
 
             fn create_table_sql(&self) -> &'static str {
                 #create_table_sql
+            }
+
+            fn drop_table_sql(&self) -> &'static str {
+                #drop_table_sql
             }
 
             fn add_column_sql(&self, column_name: &str) -> String {
@@ -169,7 +284,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
 
 impl Parse for RizzAttr {
     fn parse(input: syn::parse::ParseStream) -> Result<Self> {
-        let mut rizzle_attr = RizzAttr::default();
+        let mut rizz_attr = RizzAttr::default();
         let args_parsed =
             syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated(input)?;
         for expr in args_parsed.iter() {
@@ -181,28 +296,31 @@ impl Parse for RizzAttr {
                         {
                             match ident.to_string().as_ref() {
                                 "table" => {
-                                    rizzle_attr.table_name = Some(lit_str.clone());
+                                    rizz_attr.table_name = Some(lit_str.clone());
                                 }
                                 "r#default" => {
-                                    rizzle_attr.default_value = Some(lit_str.clone());
+                                    rizz_attr.default_value = Some(lit_str.clone());
                                 }
                                 "columns" => {
-                                    rizzle_attr.columns = Some(lit_str.clone());
+                                    rizz_attr.columns = Some(lit_str.clone());
                                 }
                                 "references" => {
-                                    rizzle_attr.references = Some(lit_str.clone());
+                                    rizz_attr.references = Some(lit_str.clone());
                                 }
                                 "many" => {
-                                    rizzle_attr.rel = Some(Rel::Many(lit_str.clone()));
+                                    rizz_attr.rel = Some(Rel::Many(lit_str.clone()));
                                 }
                                 "from" => {
-                                    rizzle_attr.from = Some(lit_str.clone());
+                                    rizz_attr.from = Some(lit_str.clone());
                                 }
                                 "to" => {
-                                    rizzle_attr.to = Some(lit_str.clone());
+                                    rizz_attr.to = Some(lit_str.clone());
                                 }
                                 "one" => {
-                                    rizzle_attr.rel = Some(Rel::One(lit_str.clone()));
+                                    rizz_attr.rel = Some(Rel::One(lit_str.clone()));
+                                }
+                                "name" => {
+                                    rizz_attr.name = Some(lit_str.clone());
                                 }
                                 _ => {}
                             }
@@ -220,9 +338,9 @@ impl Parse for RizzAttr {
                         .to_string()
                         .as_ref()
                     {
-                        "not_null" => rizzle_attr.not_null = true,
-                        "primary_key" => rizzle_attr.primary_key = true,
-                        "unique" => rizzle_attr.unique = true,
+                        "not_null" => rizz_attr.not_null = true,
+                        "primary_key" => rizz_attr.primary_key = true,
+                        "unique" => rizz_attr.unique = true,
                         _ => {}
                     },
                     _ => {}
@@ -231,7 +349,7 @@ impl Parse for RizzAttr {
             }
         }
 
-        Ok(rizzle_attr)
+        Ok(rizz_attr)
     }
 }
 
@@ -252,4 +370,5 @@ struct RizzAttr {
     from: Option<LitStr>,
     to: Option<LitStr>,
     rel: Option<Rel>,
+    name: Option<LitStr>,
 }

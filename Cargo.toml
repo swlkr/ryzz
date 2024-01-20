@@ -1,15 +1,15 @@
 [package]
-name = "rizz"
+name = "rizz_db"
 version = "0.1.0"
 edition = "2021"
 
 [workspace]
 members = [
-  "rizz_macros"
+  "rizz_db_macros"
 ]
 
 [dependencies]
-rizz_macros = { path = "rizz_macros", version = "0.1.0" }
+rizz_db_macros = { path = "rizz_db_macros", version = "0.1.0" }
 rusqlite = { version = "0.29.0", features = ["bundled"] }
 serde = { version = "1.0.188", features = ["derive"] }
 serde_json = { version = "1.0.106" }

@@ -2,10 +2,11 @@
 //!
 extern crate self as rizz;
 
-pub use rizz_macros::Table;
+pub use rizz_db_macros::{database, row, table, Table};
 use rusqlite::OpenFlags;
 use serde::Serialize;
 use serde::{de::DeserializeOwned, Deserialize};
+use std::collections::HashSet;
 use std::{marker::PhantomData, sync::Arc};
 
 #[macro_export]
@@ -39,14 +40,9 @@ macro_rules! sql {
     }};
 }
 
-pub fn connection(path: &str) -> Connection {
-    Connection::new(path)
-}
-
 #[derive(Clone, Debug)]
 pub struct Connection {
     path: Arc<str>,
-    conn: Option<tokio_rusqlite::Connection>,
     open_flags: OpenFlags,
     pragma: Option<String>,
 }
@@ -55,10 +51,18 @@ impl Connection {
     pub fn new(path: &str) -> Self {
         Self {
             path: path.into(),
-            conn: None,
             open_flags: OpenFlags::default(),
             pragma: None,
         }
+    }
+
+    pub fn default(path: &str) -> Self {
+        let c = Self::new(path)
+            .foreign_keys(true)
+            .journal_mode(JournalMode::Wal)
+            .synchronous(Synchronous::Normal);
+
+        c
     }
 
     pub fn create_if_missing(mut self, arg: bool) -> Self {
@@ -129,7 +133,7 @@ impl Connection {
             true => "ON",
             false => "OFF",
         };
-        let statement = format!("PRAGMA foreign_keys = {}", val);
+        let statement = format!("PRAGMA foreign_keys = {};", val);
         match self.pragma {
             Some(ref mut p) => {
                 p.push_str(statement.as_str());
@@ -141,221 +145,275 @@ impl Connection {
         self
     }
 
-    pub async fn open(mut self) -> Result<Self, Error> {
-        let conn = tokio_rusqlite::Connection::open(self.path.as_ref()).await?;
+    pub async fn open(&self) -> Result<tokio_rusqlite::Connection, Error> {
+        let conn = tokio_rusqlite::Connection::open_with_flags(self.path.as_ref(), self.open_flags)
+            .await?;
         if let Some(p) = self.pragma.clone() {
             let _ = conn.call(move |conn| conn.execute_batch(&p)).await?;
         }
-        self.conn = Some(conn);
 
-        Ok(self)
-    }
-
-    pub fn database(self) -> Database {
-        Database::new(self)
+        Ok(conn)
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Database {
-    connection: tokio_rusqlite::Connection,
+#[row]
+struct TableName {
+    name: String,
 }
 
-impl Database {
-    pub fn new(connection: Connection) -> Self {
-        Self {
-            connection: connection.conn.expect("Database file not found"),
+#[table("sqlite_schema")]
+struct SqliteSchema {
+    name: Text,
+    #[rizz(name = "type")]
+    r#type: Text,
+}
+
+trait Based
+where
+    Self: Sized,
+{
+    fn tables() -> Vec<Box<dyn Table + 'static>>;
+    fn connection(&self) -> &tokio_rusqlite::Connection;
+
+    async fn new(connection: Connection) -> Result<Self, Error>;
+
+    async fn migrate(&self) -> Result<usize, rizz::Error> {
+        let sqlite_schema = SqliteSchema::new();
+        let table_names: Vec<TableName> = self
+            .select()
+            .from(&sqlite_schema)
+            .r#where(eq(sqlite_schema.r#type, "table"))
+            .all()
+            .await?;
+
+        let db_table_names = table_names
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<HashSet<_>>();
+
+        let tables = Self::tables();
+        let table_names = tables
+            .iter()
+            .map(|t| t.table_name())
+            .collect::<HashSet<_>>();
+
+        let tables_to_create = table_names
+            .difference(&db_table_names)
+            .flat_map(|x| {
+                tables
+                    .iter()
+                    .filter(|t| t.table_name() == *x)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        if !tables_to_create.is_empty() {
+            println!("=== Creating tables ===");
+            let statements = tables_to_create
+                .iter()
+                .map(|x| x.create_table_sql())
+                .collect::<Vec<_>>();
+            let _ = self
+                .execute_batch(&format!("BEGIN;{}COMMIT;", statements.join(";")))
+                .await?;
+            for statement in statements {
+                println!("{}", statement);
+            }
+            println!("=== Create tables finished successfully ===");
         }
+
+        let tables_to_drop = db_table_names
+            .difference(&table_names)
+            .flat_map(|x| {
+                tables
+                    .iter()
+                    .filter(|t| t.table_name() == *x)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if !tables_to_drop.is_empty() {
+            println!("=== Drop tables ===");
+            tables_to_drop
+                .iter()
+                .map(|t| t.drop_table_sql())
+                .collect::<Vec<_>>()
+                .join(";");
+            println!("=== Drop tables finished successfully ===");
+        }
+
+        // db tables
+        // posts
+        // comments
+
+        // impl Based tables
+        // posts
+
+        // get columns in db
+        // get tables in struct (field types)
+        // get columns in each of those structs
+        Ok(tables_to_create.len() + tables_to_drop.len())
     }
 
-    pub async fn execute_batch(&self, sql: &str) -> Result<(), Error> {
-        let sql: Arc<str> = sql.into();
-        let _ = self
-            .connection
+    async fn execute_batch(&self, sql: &str) -> Result<(), Error> {
+        let sql: std::sync::Arc<str> = sql.into();
+        self.connection()
             .call(move |conn| conn.execute_batch(&sql))
             .await?;
-        Ok(())
-    }
-
-    pub async fn query<T: DeserializeOwned + Send + 'static>(
-        &self,
-        sql: Sql,
-    ) -> Result<Vec<T>, Error> {
-        rows::<T>(&self.connection, sql).await
-    }
-
-    pub fn create_table(&self, table: impl Table) -> Migrator {
-        Migrator::new(self.clone()).create_table(table)
-    }
-
-    pub fn create_unique_index(&self, table: impl Table, columns: Vec<impl ToColumn>) -> Migrator {
-        Migrator::new(self.clone()).create_unique_index(table, columns)
-    }
-
-    pub fn add_column(&self, table: impl Table, column: impl ToColumn) -> Migrator {
-        Migrator::new(self.clone()).add_column(table, column)
-    }
-
-    pub fn select(&self) -> Query {
-        Query::new(self.clone()).select()
-    }
-
-    pub fn insert(&self, table: &impl Table) -> Query {
-        Query::new(self.clone()).insert(table)
-    }
-
-    pub fn delete_from(&self, table: &impl Table) -> Query {
-        Query::new(self.clone()).delete(table)
-    }
-
-    pub fn update(&self, table: impl Table) -> Query {
-        Query::new(self.clone()).update(table)
-    }
-
-    pub fn count(&self) -> Query {
-        Query::new(self.clone()).count()
-    }
-
-    pub async fn schema(&self) -> Result<String, Error> {
-        let rows: Vec<SchemaRow> =
-            rows(&self.connection, sql!("select sql from sqlite_master")).await?;
-        let output = rows
-            .into_iter()
-            .map(|r| r.sql)
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(output)
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SchemaRow {
-    sql: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct Migrator {
-    db: Database,
-    statements: Vec<Arc<str>>,
-    quiet_migrations: bool,
-}
-
-impl Migrator {
-    fn new(db: Database) -> Self {
-        let mut migrator = Migrator {
-            db,
-            statements: vec![],
-            quiet_migrations: false,
-        };
-        let migrations = Migrations::new();
-        migrator = migrator
-            .create_table(migrations)
-            .create_unique_index(migrations, vec![migrations.sql]);
-        migrator
-    }
-
-    pub fn create_table(mut self, table: impl Table) -> Self {
-        self.statements.push(table.create_table_sql().into());
-        self
-    }
-
-    pub fn add_column(mut self, table: impl Table, column: impl ToColumn) -> Self {
-        self.statements
-            .push(table.add_column_sql(column.to_column()).into());
-        self
-    }
-
-    pub fn create_unique_index(mut self, table: impl Table, columns: Vec<impl ToColumn>) -> Self {
-        let column_names: Vec<&str> = columns.iter().map(|c| c.to_column()).collect();
-        self.statements
-            .push(table.create_index_sql(true, column_names).into());
-        self
-    }
-
-    pub fn create_index(mut self, table: impl Table, columns: Vec<impl ToColumn>) -> Self {
-        let column_names: Vec<&str> = columns.iter().map(|c| c.to_column()).collect();
-        self.statements
-            .push(table.create_index_sql(false, column_names).into());
-        self
-    }
-
-    pub fn drop_index(mut self, table: impl Table, columns: Vec<impl ToColumn>) -> Self {
-        let column_names: Vec<&str> = columns.iter().map(|c| c.to_column()).collect();
-        self.statements
-            .push(table.drop_index_sql(column_names).into());
-        self
-    }
-
-    async fn migrations(&self) -> Result<Vec<Migration>, Error> {
-        let migrations = Migrations::new();
-        let rows: Vec<Migration> = self.db.select().from(&migrations).all().await?;
-        Ok(rows)
-    }
-
-    async fn insert_migration(&self, migration: Migration) -> Result<(), Error> {
-        let migrations = Migrations::new();
-        let _row: Migration = self
-            .db
-            .insert(&migrations)
-            .values(migration)?
-            .returning()
-            .await?;
-        Ok(())
-    }
-
-    pub fn quiet_migrations(mut self) -> Self {
-        self.quiet_migrations = true;
-        self
-    }
-
-    pub async fn migrate(&self) -> Result<(), Error> {
-        let applied: Vec<Arc<str>> = self
-            .migrations()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .map(|x| x.sql.clone().into())
-            .collect();
-        let statements: Vec<&Arc<str>> = self
-            .statements
-            .iter()
-            .filter(|sql| !applied.contains(sql))
-            .collect();
-
-        if statements.len() > 0 && !self.quiet_migrations {
-            println!("=== Running migrations ===");
-        }
-
-        for sql in &statements {
-            if !self.quiet_migrations {
-                println!("{sql}");
-            }
-            let _ = self.db.execute_batch(sql).await?;
-            let _x = self
-                .insert_migration(Migration {
-                    sql: sql.to_string(),
-                })
-                .await?;
-        }
-
-        if statements.len() > 0 && !self.quiet_migrations {
-            println!("=== Migrations finished successfully ===");
-        } else if !self.quiet_migrations {
-            println!("=== No pending migrations ===");
-        }
 
         Ok(())
     }
+
+    async fn query<T: DeserializeOwned + Send + 'static>(&self, sql: Sql) -> Result<Vec<T>, Error> {
+        rows::<T>(&self.connection(), sql).await
+    }
+
+    fn select(&self) -> Query {
+        Query::new(&self.connection()).select()
+    }
+
+    fn insert(&self, table: &impl Table) -> Query {
+        Query::new(&self.connection()).insert(table)
+    }
+
+    fn delete_from(&self, table: &impl Table) -> Query {
+        Query::new(&self.connection()).delete(table)
+    }
+
+    fn update(&self, table: &impl Table) -> Query {
+        Query::new(&self.connection()).update(table)
+    }
+
+    fn count(&self) -> Query {
+        Query::new(self.connection()).count()
+    }
 }
 
-#[derive(Table, Clone, Copy)]
-#[rizz(table = "migrations")]
+// #[derive(serde::Serialize, serde::Deserialize)]
+// struct SchemaRow {
+//     sql: String,
+// }
+
+// #[derive(Clone, Debug)]
+// pub struct Migrator {
+//     statements: Vec<Arc<str>>,
+//     quiet_migrations: bool,
+// }
+
+// impl Migrator {
+//     fn new(db: Database) -> Self {
+//         let mut migrator = Migrator {
+//             db,
+//             statements: vec![],
+//             quiet_migrations: false,
+//         };
+//         let migrations = Migrations::new();
+//         migrator = migrator
+//             .create_table(migrations)
+//             .create_unique_index(migrations, vec![migrations.sql]);
+//         migrator
+//     }
+
+//     pub fn create_table(mut self, table: impl Table) -> Self {
+//         self.statements.push(table.create_table_sql().into());
+//         self
+//     }
+
+//     pub fn add_column(mut self, table: impl Table, column: impl ToColumn) -> Self {
+//         self.statements
+//             .push(table.add_column_sql(column.to_column()).into());
+//         self
+//     }
+
+//     pub fn create_unique_index(mut self, table: impl Table, columns: Vec<impl ToColumn>) -> Self {
+//         let column_names: Vec<&str> = columns.iter().map(|c| c.to_column()).collect();
+//         self.statements
+//             .push(table.create_index_sql(true, column_names).into());
+//         self
+//     }
+
+//     pub fn create_index(mut self, table: impl Table, columns: Vec<impl ToColumn>) -> Self {
+//         let column_names: Vec<&str> = columns.iter().map(|c| c.to_column()).collect();
+//         self.statements
+//             .push(table.create_index_sql(false, column_names).into());
+//         self
+//     }
+
+//     pub fn drop_index(mut self, table: impl Table, columns: Vec<impl ToColumn>) -> Self {
+//         let column_names: Vec<&str> = columns.iter().map(|c| c.to_column()).collect();
+//         self.statements
+//             .push(table.drop_index_sql(column_names).into());
+//         self
+//     }
+
+//     async fn migrations(&self) -> Result<Vec<Migration>, Error> {
+//         let migrations = Migrations::new();
+//         let rows: Vec<Migration> = self.db.select().from(&migrations).all().await?;
+//         Ok(rows)
+//     }
+
+//     async fn insert_migration(&self, migration: Migration) -> Result<(), Error> {
+//         let migrations = Migrations::new();
+//         let _row: Migration = self
+//             .db
+//             .insert(&migrations)
+//             .values(migration)?
+//             .returning()
+//             .await?;
+//         Ok(())
+//     }
+
+//     pub fn quiet_migrations(mut self) -> Self {
+//         self.quiet_migrations = true;
+//         self
+//     }
+
+//     pub async fn migrate(&self) -> Result<(), Error> {
+//         let applied: Vec<Arc<str>> = self
+//             .migrations()
+//             .await
+//             .unwrap_or_default()
+//             .iter()
+//             .map(|x| x.sql.clone().into())
+//             .collect();
+//         let statements: Vec<&Arc<str>> = self
+//             .statements
+//             .iter()
+//             .filter(|sql| !applied.contains(sql))
+//             .collect();
+
+//         if statements.len() > 0 && !self.quiet_migrations {
+//             println!("=== Running migrations ===");
+//         }
+
+//         for sql in &statements {
+//             if !self.quiet_migrations {
+//                 println!("{sql}");
+//             }
+//             let _ = self.db.execute_batch(sql).await?;
+//             let _x = self
+//                 .insert_migration(Migration {
+//                     sql: sql.to_string(),
+//                 })
+//                 .await?;
+//         }
+
+//         if statements.len() > 0 && !self.quiet_migrations {
+//             println!("=== Migrations finished successfully ===");
+//         } else if !self.quiet_migrations {
+//             println!("=== No pending migrations ===");
+//         }
+
+//         Ok(())
+//     }
+// }
+
+#[table("rizz_migrations")]
 struct Migrations {
-    #[rizz(not_null)]
+    #[rizz(not_null, unique)]
     sql: Text,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[row]
 struct Migration {
     sql: String,
 }
@@ -506,8 +564,26 @@ pub fn desc(col: impl ToColumn) -> Sql {
     }
 }
 
-impl Query {
-    pub fn new(db: Database) -> Self {
+#[derive(Clone, Debug)]
+pub struct Query<'a> {
+    connection: &'a tokio_rusqlite::Connection,
+    select: Option<Arc<str>>,
+    from: Option<Arc<str>>,
+    r#where: Option<Arc<str>>,
+    limit: Option<Arc<str>>,
+    insert_into: Option<Arc<str>>,
+    set: Option<Arc<str>>,
+    delete: Option<Arc<str>>,
+    values_sql: Option<Arc<str>>,
+    returning: Option<Arc<str>>,
+    values: Vec<Value>,
+    update: Option<Arc<str>>,
+    order: Option<Arc<str>>,
+    group_by: Option<Arc<str>>,
+}
+
+impl<'a> Query<'a> {
+    pub fn new(connection: &'a tokio_rusqlite::Connection) -> Self {
         Self {
             select: None,
             from: None,
@@ -522,7 +598,7 @@ impl Query {
             returning: None,
             order: None,
             group_by: None,
-            db,
+            connection,
         }
     }
 
@@ -609,7 +685,7 @@ impl Query {
     where
         T: DeserializeOwned + Send + Sync + 'static,
     {
-        let rows = rows(&self.db.connection, self.sql_statement()).await?;
+        let rows = rows(&self.connection, self.sql_statement()).await?;
         Ok(rows)
     }
 
@@ -617,7 +693,7 @@ impl Query {
     where
         T: DeserializeOwned + Send + Sync + 'static,
     {
-        let row = rows::<T>(&self.db.connection, self.sql_statement())
+        let row = rows::<T>(&self.connection, self.sql_statement())
             .await?
             .into_iter()
             .nth(0)
@@ -625,11 +701,11 @@ impl Query {
         Ok(row)
     }
 
-    pub async fn prepare<T>(self, db: &Database) -> Result<Prep<T>, Error>
+    pub async fn prepare<T>(self, connection: tokio_rusqlite::Connection) -> Result<Prep<T>, Error>
     where
         T: DeserializeOwned + Send + Sync + 'static,
     {
-        let prep = prepare::<T>(&db.connection, self.sql_statement()).await?;
+        let prep = prepare::<T>(&connection, self.sql_statement()).await?;
         Ok(prep)
     }
 
@@ -638,9 +714,7 @@ impl Query {
         self
     }
 
-    fn row_to_named_params(
-        row: impl Serialize + std::fmt::Debug,
-    ) -> Result<Vec<(Arc<str>, Value)>, Error> {
+    fn row_to_named_params(row: impl Serialize) -> Result<Vec<(Arc<str>, Value)>, Error> {
         let named_params = serde_rusqlite::to_params_named(row)?;
         named_params
             .iter()
@@ -653,7 +727,7 @@ impl Query {
             .collect()
     }
 
-    pub fn values(mut self, row: impl Serialize + std::fmt::Debug) -> Result<Self, Error> {
+    pub fn values(mut self, row: impl Serialize) -> Result<Self, Error> {
         let named_params = Self::row_to_named_params(row)?;
         let column_names = named_params
             .iter()
@@ -682,12 +756,12 @@ impl Query {
         Ok(self)
     }
 
-    pub fn update(mut self, table: impl Table) -> Self {
+    pub fn update(mut self, table: &impl Table) -> Self {
         self.update = Some(format!("update {}", table.table_name()).into());
         self
     }
 
-    pub fn set(mut self, row: impl Serialize + std::fmt::Debug) -> Result<Self, Error> {
+    pub fn set(mut self, row: impl Serialize) -> Result<Self, Error> {
         let named_params = Self::row_to_named_params(row)?;
         let set = named_params
             .iter()
@@ -712,7 +786,7 @@ impl Query {
         mut self,
     ) -> Result<T, Error> {
         self.returning = Some("returning *".into());
-        let rows = rows::<T>(&self.db.connection, self.sql_statement()).await?;
+        let rows = rows::<T>(&self.connection, self.sql_statement()).await?;
         if let Some(row) = rows.into_iter().nth(0) {
             Ok(row)
         } else {
@@ -724,16 +798,16 @@ impl Query {
     }
 
     pub async fn rows_affected(&self) -> Result<usize, Error> {
-        let rows_affected = execute(&self.db.connection, self.sql_statement()).await?;
+        let rows_affected = execute(&self.connection, self.sql_statement()).await?;
         Ok(rows_affected)
     }
 
-    pub fn select_with(mut self, sql: Sql) -> Query {
+    pub fn select_with(mut self, sql: Sql) -> Query<'a> {
         self.select = Some(format!("select {}", sql.clause).into());
         self
     }
 
-    pub fn count(mut self) -> Query {
+    pub fn count(mut self) -> Query<'a> {
         self.select = Some(format!("select count(*) as count").into());
         self
     }
@@ -778,34 +852,16 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Query {
-    db: Database,
-    select: Option<Arc<str>>,
-    from: Option<Arc<str>>,
-    r#where: Option<Arc<str>>,
-    limit: Option<Arc<str>>,
-    insert_into: Option<Arc<str>>,
-    set: Option<Arc<str>>,
-    delete: Option<Arc<str>>,
-    values_sql: Option<Arc<str>>,
-    returning: Option<Arc<str>>,
-    values: Vec<Value>,
-    update: Option<Arc<str>>,
-    order: Option<Arc<str>>,
-    group_by: Option<Arc<str>>,
-}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Text(pub &'static str);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Blob(pub &'static str);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Integer(pub &'static str);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Real(pub &'static str);
 
 pub trait ToColumn {
@@ -869,6 +925,34 @@ pub fn or(left: Sql, right: Sql) -> Sql {
 pub fn eq(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     Sql {
         clause: format!("{} = ?", left.to_column()),
+        params: vec![right.into()],
+    }
+}
+
+pub fn gt(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+    Sql {
+        clause: format!("{} > ?", left.to_column()),
+        params: vec![right.into()],
+    }
+}
+
+pub fn lt(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+    Sql {
+        clause: format!("{} < ?", left.to_column()),
+        params: vec![right.into()],
+    }
+}
+
+pub fn gte(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+    Sql {
+        clause: format!("{} >= ?", left.to_column()),
+        params: vec![right.into()],
+    }
+}
+
+pub fn lte(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+    Sql {
+        clause: format!("{} <= ?", left.to_column()),
         params: vec![right.into()],
     }
 }
@@ -961,6 +1045,7 @@ pub trait Table {
         Self: Sized + Clone;
     fn table_name(&self) -> &'static str;
     fn create_table_sql(&self) -> &'static str;
+    fn drop_table_sql(&self) -> &'static str;
     fn add_column_sql(&self, column_name: &str) -> String;
     fn create_index_sql(&self, unique: bool, column_names: Vec<&str>) -> String;
     fn drop_index_sql(&self, column_names: Vec<&str>) -> String;
@@ -972,6 +1057,8 @@ pub enum Error {
     ConnectionClosed,
     #[error("database connection closing: {0}")]
     Close(String),
+    #[error("unique constraint failed: {0}")]
+    UniqueConstraint(String),
     #[error("database error: {0}")]
     Database(String),
     #[error("missing from statement in sql query")]
@@ -991,7 +1078,16 @@ impl From<tokio_rusqlite::Error> for Error {
         match value {
             tokio_rusqlite::Error::ConnectionClosed => Self::ConnectionClosed,
             tokio_rusqlite::Error::Close((_, error)) => Self::Close(error.to_string()),
-            tokio_rusqlite::Error::Rusqlite(err) => Self::Database(err.to_string()),
+            tokio_rusqlite::Error::Rusqlite(err) => match err {
+                rusqlite::Error::SqliteFailure(x, y) => match x.code {
+                    rusqlite::ErrorCode::ConstraintViolation => match x.extended_code {
+                        2067 => Self::UniqueConstraint(y.unwrap_or(x.to_string())),
+                        _ => Self::Database(x.to_string()),
+                    },
+                    _ => Self::Database(x.to_string()),
+                },
+                _ => Self::Database(err.to_string()),
+            },
             _ => todo!(),
         }
     }
@@ -1097,266 +1193,96 @@ pub struct Schema {
 
 #[cfg(test)]
 mod tests {
-    use rizz::{and, eq, or, Error, Integer, Sql, Table, Value};
-    use serde::{Deserialize, Serialize};
-
-    use crate::{connection, desc, Real, Text};
-
-    type TestResult<T> = Result<T, Error>;
-
-    #[test]
-    fn sql_macro_with_text_param_works() {
-        let accounts = Accounts::new();
-
-        let sql = sql!("select * from {} where {} = {}", accounts, accounts.id, "1");
-
-        assert_eq!(
-            sql.clause.to_string(),
-            r#"select * from "accounts" where "accounts"."id" = ?"#
-        );
-        assert_eq!(sql.params, vec![Value::Text("1".into())]);
-    }
-
-    #[test]
-    fn sql_macro_with_integer_param_works() {
-        let accounts = Accounts::new();
-
-        let sql: Sql = sql!("select * from {} where {} = {}", accounts, accounts.id, 1);
-        assert_eq!(
-            sql.clause.to_string(),
-            r#"select * from "accounts" where "accounts"."id" = ?"#
-        );
-        assert_eq!(sql.params, vec![Value::Integer(1)]);
-    }
-
-    #[test]
-    fn sql_macro_with_real_param_works() {
-        let accounts = Accounts::new();
-
-        let sql: Sql = sql!("select * from {} where {} = {}", accounts, accounts.id, 1.0);
-        assert_eq!(
-            sql.clause.to_string(),
-            r#"select * from "accounts" where "accounts"."id" = ?"#
-        );
-        assert_eq!(sql.params, vec![Value::Real(1.0)]);
-    }
-
-    #[test]
-    fn sql_macro_with_byte_param_works() {
-        let accounts = Accounts::new();
-
-        let bytes: Vec<u8> = vec![0x10];
-        let sql: Sql = sql!(
-            "select * from {} where {} = {}",
-            accounts,
-            accounts.id,
-            bytes
-        );
-        assert_eq!(
-            sql.clause.to_string(),
-            r#"select * from "accounts" where "accounts"."id" = ?"#
-        );
-        assert_eq!(sql.params, vec![Value::Blob(vec![0x10])]);
-    }
-
     #[tokio::test]
-    async fn where_clauses_work() -> TestResult<()> {
-        let db = connection(":memory:").open().await?.database();
-        let accounts = Accounts::new();
-
-        let query = db.select().from(&accounts).r#where(or(
-            and(eq(accounts.id, "1"), eq(accounts.id, "1".to_owned())),
-            eq(accounts.id, 1),
-        ));
-
-        let query2 = db.select().from(&accounts).r#where(sql!(
-            "(({} = {} and {} = {}) or {} = {})",
-            accounts.id,
-            "1",
-            accounts.id,
-            "1",
-            accounts.id,
-            1
-        ));
-
-        assert_eq!(query.sql(), query2.sql());
-
-        assert_eq!(
-            query.sql(),
-            r#"select * from "accounts" where (("accounts"."id" = ? and "accounts"."id" = ?) or "accounts"."id" = ?)"#
-        );
-        assert_eq!(
-            query.values,
-            vec![
-                Value::Text("1".into()),
-                Value::Text("1".into()),
-                Value::Integer(1)
-            ]
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn crud_works() -> TestResult<()> {
-        let db = connection(":memory:").open().await?.database();
-        let accounts = Accounts::new();
-        let migrations = db.create_table(accounts).migrate().await?;
-        dbg!(&migrations);
-        let account = Account {
-            id: 1,
-            name: "inserted".into(),
-        };
-        let insert_query = db.insert(&accounts).values(account)?;
-        assert_eq!(
-            "insert into \"accounts\" (id,name) values (?,?)",
-            insert_query.sql()
-        );
-        let mut inserted: Account = insert_query.returning().await?;
-
-        assert_eq!(inserted.id, 1);
-        assert_eq!(inserted.name, "inserted");
-
-        inserted.name = "updated".into();
-        let update_query = db
-            .update(accounts)
-            .set(inserted)?
-            .r#where(eq(accounts.id, 1));
-
-        assert_eq!(
-            update_query.sql(),
-            "update \"accounts\" set id = ?,name = ? where \"accounts\".\"id\" = ?"
-        );
-
-        let updated: Account = update_query.returning().await?;
-
-        assert_eq!(updated.id, 1);
-        assert_eq!(updated.name, "updated");
-
-        let rows: Vec<Account> = db
-            .select()
-            .from(&accounts)
-            .r#where(eq(accounts.id, 1))
-            .order(vec![desc(accounts.id), desc(accounts.name)])
-            .all()
-            .await?;
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows.iter().nth(0).unwrap().id, 1);
-        assert_eq!(rows.iter().nth(0).unwrap().name, "updated");
-
-        let rows_affected = db
-            .delete_from(&accounts)
-            .r#where(eq(accounts.id, 1))
-            .rows_affected()
-            .await?;
-
-        assert_eq!(rows_affected, 1);
-
-        let RowCount { count } = db
-            .count()
-            .from(&accounts)
-            .r#where(eq(accounts.id, 1))
-            .first()
-            .await?;
-
-        assert_eq!(count, 0);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn migrate_works() -> TestResult<()> {
-        #[allow(unused)]
-        #[derive(Table, Clone, Copy)]
-        #[rizz(table = "todos")]
-        struct Todos {
-            #[rizz(primary_key)]
-            id: Integer,
-            #[rizz(not_null)]
-            created_at: Real,
-        }
-
-        let connection = connection(":memory:").open().await?;
-        let db = connection.database();
-        let todos = Todos::new();
-        let migrations = db
-            .create_table(todos)
-            .create_index(todos, vec![todos.created_at]);
-        let _ = migrations.migrate().await?;
-        let schema = db.schema().await?;
-        let rows = vec![
-            "CREATE TABLE \"migrations\" (sql text not null)",
-            "CREATE UNIQUE INDEX migrations_sql on migrations (sql)",
-            "CREATE TABLE \"todos\" (id integer primary key,created_at real not null)",
-            "CREATE INDEX todos_created_at on todos (created_at)",
-        ];
-        assert_eq!(schema, rows.join("\n"));
-
-        #[allow(unused)]
-        #[derive(Table, Clone, Copy)]
-        #[rizz(table = "todos")]
-        struct Todos1 {
-            #[rizz(primary_key)]
-            id: Integer,
-            #[rizz(not_null)]
-            created_at: Integer,
-            #[rizz(not_null, r#default = "0")]
-            updated_at: Integer,
-        }
-
-        let todos = Todos1::new();
-        let migrations = migrations
-            .clone()
-            .add_column(todos, todos.updated_at)
-            .drop_index(todos, vec![todos.created_at]);
-
-        let _ = migrations.migrate().await?;
-
-        let schema = db.schema().await?;
-        let statements = vec![
-            "CREATE TABLE \"migrations\" (sql text not null)",
-            "CREATE UNIQUE INDEX migrations_sql on migrations (sql)",
-            "CREATE TABLE \"todos\" (id integer primary key,created_at real not null, updated_at integer not null default (0))"
-        ];
-        assert_eq!(schema, statements.join("\n"));
-
-        let _ = migrations
-            .clone()
-            .create_unique_index(todos, vec![todos.created_at])
-            .migrate()
-            .await?;
-
-        let schema = db.schema().await?;
-        let statements = vec![
-            "CREATE TABLE \"migrations\" (sql text not null)",
-            "CREATE UNIQUE INDEX migrations_sql on migrations (sql)",
-            "CREATE TABLE \"todos\" (id integer primary key,created_at real not null, updated_at integer not null default (0))",
-            "CREATE UNIQUE INDEX todos_created_at on todos (created_at)"
-        ];
-        assert_eq!(schema, statements.join("\n"));
-
-        Ok(())
-    }
-
-    #[derive(Deserialize, PartialEq, Debug)]
-    struct RowCount {
-        count: u64,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct Account {
-        id: u64,
-        name: String,
-    }
-
     #[allow(unused)]
-    #[derive(Table, Clone, Copy)]
-    #[rizz(table = "accounts")]
-    struct Accounts {
-        #[rizz(primary_key)]
-        id: Integer,
-        #[rizz(not_null)]
-        name: Text,
+    async fn readme_works() -> Result<(), rizz::Error> {
+        use rizz::*;
+        use serde::{Deserialize, Serialize};
+
+        #[database]
+        struct Database {
+            posts: Posts,
+            comments: Comments,
+        }
+
+        #[table("posts")]
+        struct Posts {
+            #[rizz(primary_key)]
+            id: Integer,
+
+            #[rizz(not_null)]
+            body: Text,
+        }
+
+        #[table("comments")]
+        struct Comments {
+            #[rizz(primary_key)]
+            id: Integer,
+
+            #[rizz(not_null)]
+            body: Text,
+
+            #[rizz(references = "posts(id)")]
+            post_id: Integer,
+        }
+
+        #[row]
+        #[derive(PartialEq, Clone)]
+        struct Post {
+            id: u64,
+            body: String,
+        }
+
+        #[row]
+        struct Comment {
+            id: u64,
+            body: String,
+            post_id: u64,
+            post_body: Option<String>,
+        }
+
+        let db = Database::new(Connection::default(":memory:")).await?;
+
+        let Database {
+            posts, comments, ..
+        } = &db;
+
+        let new_post = Post {
+            id: 1,
+            body: "".into(),
+        };
+
+        let mut inserted_post: Post = db
+            .insert(posts)
+            .values(new_post.clone())?
+            .returning()
+            .await?;
+
+        assert_eq!(inserted_post, new_post);
+
+        // update posts set body = ?, id = ? where id = ?
+        let updated_post: Post = db
+            .update(posts)
+            .set(Post {
+                body: "post".into(),
+                ..inserted_post
+            })?
+            .r#where(eq(posts.id, 1))
+            .returning()
+            .await?;
+
+        inserted_post.body = "post".into();
+        assert_eq!(updated_post, inserted_post);
+
+        // delete from posts where id = ? returning *
+        let deleted_post: Post = db
+            .delete_from(posts)
+            .r#where(eq(posts.id, 1))
+            .returning()
+            .await?;
+
+        assert_eq!(deleted_post, inserted_post);
+
+        Ok(())
     }
 }
