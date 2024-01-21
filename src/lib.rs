@@ -4,8 +4,7 @@ extern crate self as rizz;
 
 pub use rizz_db_macros::{database, row, table, Row, Table};
 use rusqlite::OpenFlags;
-use serde::Serialize;
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashSet;
 use std::{marker::PhantomData, sync::Arc};
 
@@ -849,31 +848,6 @@ impl<'a> Query<'a> {
     where
         T: Row + DeserializeOwned + Send + Sync + 'static,
     {
-        // if let Some(ref select) = self.select {
-        //     if "select *" == select {
-        //         if !self.joins.is_empty() {
-        //             let joins = self
-        //                 .joins
-        //                 .iter()
-        //                 .map(json_object)
-        //                 .collect::<Vec<_>>()
-        //                 .join(",");
-        //             let from = match self.from.as_ref() {
-        //                 Some(from) => json_object(from),
-        //                 None => "".to_owned(),
-        //             };
-        //             self.select = Some(format!("select {}, {}", joins, from));
-        //             println!("{}", self.sql_statement().clause);
-        //         } else {
-        //             let from = match self.from.as_ref() {
-        //                 Some(from) => json_object(from),
-        //                 None => "".to_owned(),
-        //             };
-        //             self.select = Some(format!("select {}", from))
-        //         }
-        //     }
-        // };
-
         let rows = rows(&self.connection, self.sql_statement::<T>()).await?;
         Ok(rows)
     }
@@ -1421,7 +1395,6 @@ mod tests {
     #[allow(unused)]
     async fn readme_works() -> Result<(), rizz::Error> {
         use rizz::*;
-        use serde::{Deserialize, Serialize};
 
         #[database]
         struct Database {

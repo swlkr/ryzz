@@ -10,7 +10,7 @@ use syn::{
 pub fn row(_args: TokenStream, input: TokenStream) -> TokenStream {
     let input: TokenStream2 = input.into();
     let output = quote! {
-        #[derive(Row, Serialize, Deserialize, Debug)]
+        #[derive(Row, serde::Serialize, serde::Deserialize, Debug)]
         #input
     };
 

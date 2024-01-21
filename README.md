@@ -14,7 +14,6 @@ cargo add rizz_db # rizz was already taken on crates.io :(
 
 ```rust
 use rizz::*;
-use serde::Deserialize;
 
 #[database]
 struct Database {
