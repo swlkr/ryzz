@@ -94,10 +94,10 @@ async fn main() -> Result<(), rizz::Error> {
 
     // querying
 
-    // select json_object('id', "comments"."id") from comments
+    // select ... from comments
     let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
-    // select id, body from comments
+    // select ... from comments
     let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await?;
 
     #[row]
@@ -106,7 +106,7 @@ async fn main() -> Result<(), rizz::Error> {
         posts: Post
     }
 
-    // select * from comments inner join posts on posts.id = comments.post_id
+    // select ... from comments inner join posts on posts.id = comments.post_id
     let rows: Vec<CommentWithPost> = db
         .select(())
         .from(comments)
@@ -116,7 +116,7 @@ async fn main() -> Result<(), rizz::Error> {
 
     // prepared statements
 
-    // select * from comments
+    // select ... from comments
     let query = db.select(()).from(comments);
 
     // prepare the query
