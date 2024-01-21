@@ -5,7 +5,7 @@ rizz is an automatic migration generator and query builder for sqlite for rust. 
 # Install
 
 ```sh
-cargo add rizz_db # rizz was already taken on crates.io :(
+cargo add rizz_db
 ```
 
 # Declare your schema
