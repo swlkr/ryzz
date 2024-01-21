@@ -94,7 +94,7 @@ async fn main() -> Result<(), rizz::Error> {
 
     // querying
 
-    // select * from comments
+    // select json_object('id', "comments"."id") from comments
     let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
     // select id, body from comments

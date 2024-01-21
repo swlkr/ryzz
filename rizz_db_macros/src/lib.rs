@@ -10,11 +10,67 @@ use syn::{
 pub fn row(_args: TokenStream, input: TokenStream) -> TokenStream {
     let input: TokenStream2 = input.into();
     let output = quote! {
-        #[derive(Serialize, Deserialize, Debug)]
+        #[derive(Row, Serialize, Deserialize, Debug)]
         #input
     };
 
     output.into()
+}
+
+#[proc_macro_derive(Row, attributes(rizz))]
+pub fn row_derive(s: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(s as DeriveInput);
+    match row_derive_macro(input) {
+        Ok(s) => s.to_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn row_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let struct_name = input.ident;
+    let attrs = match input.data {
+        syn::Data::Struct(ref data) => data
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    field
+                        .ident
+                        .as_ref()
+                        .expect("Struct fields should have names"),
+                    &field.ty,
+                    &field.attrs,
+                )
+            })
+            .collect::<Vec<_>>(),
+        _ => unimplemented!(),
+    };
+    let columns = attrs
+        .iter()
+        .map(|(ident, _, attrs)| {
+            let rizz_attr = if let Some(attr) = attrs.iter().nth(0) {
+                attr.parse_args::<RizzAttr>().ok()
+            } else {
+                None
+            };
+
+            match rizz_attr {
+                Some(attr) => match attr.name {
+                    Some(name) => name.value(),
+                    None => ident.to_string(),
+                },
+                None => ident.to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(quote! {
+        impl rizz::Row for #struct_name {
+            fn column_names() -> Vec<&'static str> {
+                vec![#(#columns,)*]
+            }
+        }
+    })
 }
 
 struct Args {
@@ -143,6 +199,25 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         .iter()
         .filter(|(_, ty, _)| ty.to_token_stream().to_string() != "Index")
         .collect::<Vec<_>>();
+    let column_names = attrs
+        .iter()
+        .map(|(ident, _, attrs)| {
+            let rizz_attr = if let Some(attr) = attrs.iter().nth(0) {
+                attr.parse_args::<RizzAttr>().ok()
+            } else {
+                None
+            };
+
+            match rizz_attr {
+                Some(attr) => match attr.name {
+                    Some(name) => name.value(),
+                    None => ident.to_string(),
+                },
+                None => ident.to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+
     let column_defs = column_fields
         .iter()
         .filter_map(|(ident, ty, attrs)| {
@@ -225,12 +300,17 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         table_name, column_def_sql
     );
     let drop_table_sql = format!("drop table if exists {};", table_name);
+    let struct_string = struct_name.to_string();
     Ok(quote! {
         impl rizz::Table for #struct_name {
             fn new() -> Self {
                 Self {
                     #(#attrs,)*
                 }
+            }
+
+            fn struct_name(&self) -> &'static str {
+                #struct_string
             }
 
             fn table_name(&self) -> &'static str {
@@ -243,6 +323,10 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
 
             fn drop_table_sql(&self) -> &'static str {
                 #drop_table_sql
+            }
+
+            fn column_names(&self) -> Vec<&'static str> {
+                vec![#(#column_names,)*]
             }
 
             fn add_column_sql(&self, column_name: &str) -> String {

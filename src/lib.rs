@@ -2,7 +2,7 @@
 //!
 extern crate self as rizz;
 
-pub use rizz_db_macros::{database, row, table, Table};
+pub use rizz_db_macros::{database, row, table, Row, Table};
 use rusqlite::OpenFlags;
 use serde::Serialize;
 use serde::{de::DeserializeOwned, Deserialize};
@@ -179,11 +179,12 @@ where
 
     async fn migrate(&self) -> Result<usize, rizz::Error> {
         let sqlite_schema = SqliteSchema::new();
+
         let table_names: Vec<TableName> = self
-            .select()
+            .select(())
             .from(&sqlite_schema)
             .r#where(eq(sqlite_schema.r#type, "table"))
-            .all()
+            .all::<TableName>()
             .await?;
 
         let db_table_names = table_names
@@ -241,16 +242,6 @@ where
             println!("=== Drop tables finished successfully ===");
         }
 
-        // db tables
-        // posts
-        // comments
-
-        // impl Based tables
-        // posts
-
-        // get columns in db
-        // get tables in struct (field types)
-        // get columns in each of those structs
         Ok(tables_to_create.len() + tables_to_drop.len())
     }
 
@@ -267,27 +258,60 @@ where
         rows::<T>(&self.connection(), sql).await
     }
 
-    fn select(&self) -> Query {
-        Query::new(&self.connection()).select()
+    fn select(&self, columns: impl Select) -> Query {
+        Query::new(&self.connection()).select(columns)
     }
 
     fn insert(&self, table: &impl Table) -> Query {
         Query::new(&self.connection()).insert(table)
     }
 
-    fn delete_from(&self, table: &impl Table) -> Query {
+    fn delete_from<'a>(&'a self, table: &'a dyn Table) -> Query<'a> {
         Query::new(&self.connection()).delete(table)
     }
 
-    fn update(&self, table: &impl Table) -> Query {
+    fn update<'a>(&'a self, table: &'a dyn Table) -> Query<'a> {
         Query::new(&self.connection()).update(table)
     }
 
-    fn count(&self) -> Query {
-        Query::new(self.connection()).count()
+    // fn count(&self) -> Query {
+    //     Query::new(self.connection()).count()
+    // }
+}
+
+pub trait Select {
+    fn columns(&self) -> Vec<&'static str>;
+    fn clause(&self) -> SelectClause;
+}
+
+impl Select for () {
+    fn columns(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
+    fn clause(&self) -> SelectClause {
+        SelectClause::All
     }
 }
 
+impl<A, B> Select for (A, B)
+where
+    A: ToColumn,
+    B: ToColumn,
+{
+    fn columns(&self) -> Vec<&'static str> {
+        vec![self.0.to_column(), self.1.to_column()]
+    }
+
+    fn clause(&self) -> SelectClause {
+        let tbl = Tbl {
+            table_name: None,
+            column_names: self.columns(),
+        };
+
+        SelectClause::Sql(format!("select {}", json_object(&tbl, true)))
+    }
+}
 // #[derive(serde::Serialize, serde::Deserialize)]
 // struct SchemaRow {
 //     sql: String,
@@ -517,14 +541,23 @@ async fn rows<T: DeserializeOwned + Send + 'static>(
                 .iter()
                 .map(|value| value.to_sql())
                 .collect::<Vec<_>>();
-            let mut stmt = conn.prepare_cached(&clause)?;
+            let mut stmt = conn.prepare(&clause)?;
+            // let columns = columns_from_statement(&stmt);
             let rows = stmt.query(&*params)?;
-            let rows: Result<Vec<T>, serde_rusqlite::Error> =
-                serde_rusqlite::from_rows::<T>(rows).collect();
-            let rows = rows.expect("failed to deserialize rows");
+            // HACK there is only ever one column, it should always be valid json
+            let rows = rows
+                .mapped(|row| {
+                    let x: String = row.get(0)?;
+                    let y = serde_json::from_str::<T>(&x).unwrap();
+                    Ok(y)
+                })
+                .collect::<Result<Vec<_>, rusqlite::Error>>();
+            // let rows: Result<Vec<T>, serde_rusqlite::Error> =
+            //     serde_rusqlite::from_rows::<T>(rows).collect();
+            // let rows = rows.expect("failed to deserialize rows");
             Ok(rows)
         })
-        .await?;
+        .await??;
 
     Ok(results)
 }
@@ -565,10 +598,65 @@ pub fn desc(col: impl ToColumn) -> Sql {
 }
 
 #[derive(Clone, Debug)]
+struct Tbl<'a> {
+    table_name: Option<&'a str>,
+    column_names: Vec<&'static str>,
+}
+
+fn column_name(table_name: Option<&str>, column_name: &str) -> String {
+    match table_name {
+        Some(t) => format!("{}.{}", t, column_name),
+        None => format!("{}", column_name),
+    }
+}
+
+fn json_object(tbl: &Tbl, r#as: bool) -> String {
+    let r#as = match tbl.table_name {
+        Some(s) => {
+            if r#as {
+                format!("as {}", s)
+            } else {
+                "".into()
+            }
+        }
+        None => "".into(),
+    };
+    format!(
+        "json_object({}) {}",
+        tbl.column_names
+            .iter()
+            .map(|col| {
+                // HACK Stop qualifying column names in proc macro
+                let c = col.split(".").nth(1).unwrap_or(col).replace("\"", "");
+                format!(r#"'{}', {}"#, c, column_name(tbl.table_name, col))
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        r#as
+    )
+}
+
+impl<'a> From<&'a dyn Table> for Tbl<'a> {
+    fn from(value: &'a dyn Table) -> Self {
+        Tbl {
+            table_name: Some(value.table_name()),
+            column_names: value.column_names(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum SelectClause {
+    All,
+    Sql(String),
+    None,
+}
+
+#[derive(Clone)]
 pub struct Query<'a> {
     connection: &'a tokio_rusqlite::Connection,
-    select: Option<Arc<str>>,
-    from: Option<Arc<str>>,
+    select: SelectClause,
+    from: Option<Tbl<'a>>,
     r#where: Option<Arc<str>>,
     limit: Option<Arc<str>>,
     insert_into: Option<Arc<str>>,
@@ -580,12 +668,14 @@ pub struct Query<'a> {
     update: Option<Arc<str>>,
     order: Option<Arc<str>>,
     group_by: Option<Arc<str>>,
+    inner_joins: Option<String>,
+    tables: Vec<Tbl<'a>>,
 }
 
 impl<'a> Query<'a> {
     pub fn new(connection: &'a tokio_rusqlite::Connection) -> Self {
         Self {
-            select: None,
+            select: SelectClause::None,
             from: None,
             r#where: None,
             limit: None,
@@ -598,19 +688,27 @@ impl<'a> Query<'a> {
             returning: None,
             order: None,
             group_by: None,
+            inner_joins: None,
+            tables: vec![],
             connection,
         }
     }
 
-    pub fn select(mut self) -> Self {
-        self.select = Some(format!("select *").into());
-
+    pub fn select(mut self, columns: impl Select) -> Self {
+        self.select = columns.clause();
         self
     }
 
     pub fn from(mut self, table: &impl Table) -> Self {
-        self.from = Some(format!("from {}", table.table_name()).into());
-
+        let tbl = Tbl {
+            table_name: Some(table.table_name()),
+            column_names: table.column_names(),
+        };
+        self.from = Some(tbl);
+        self.tables.push(Tbl {
+            table_name: Some(table.table_name()),
+            column_names: table.column_names(),
+        });
         self
     }
 
@@ -636,6 +734,24 @@ impl<'a> Query<'a> {
         self
     }
 
+    pub fn inner_join(mut self, table: &impl Table, sql: Sql) -> Self {
+        match self.inner_joins {
+            Some(ref mut inner_joins) => {
+                inner_joins.push_str(&format!("inner join {} {}", table.table_name(), sql.clause))
+            }
+            None => {
+                self.inner_joins =
+                    Some(format!("inner join {} {}", table.table_name(), sql.clause).into())
+            }
+        }
+        self.tables.push(Tbl {
+            table_name: Some(table.table_name()),
+            column_names: table.column_names(),
+        });
+
+        self
+    }
+
     pub fn group_by(mut self, columns: Vec<impl ToColumn>) -> Self {
         let column_names = columns
             .iter()
@@ -651,22 +767,70 @@ impl<'a> Query<'a> {
         self
     }
 
-    fn sql_statement(&self) -> Sql {
+    fn sql_statement<T: Row>(&self) -> Sql {
         Sql {
-            clause: self.sql(),
+            clause: self.sql::<T>(),
             params: self.values.clone(),
         }
     }
 
-    pub fn sql(&self) -> String {
+    pub fn sql<T: Row>(&self) -> String {
+        let select = match &self.select {
+            SelectClause::All => match &self.from {
+                Some(tbl) => {
+                    if self.tables.is_empty() {
+                        Some(format!("select {}", json_object(&tbl, true)).into())
+                    } else {
+                        if self.tables.len() == 1 {
+                            let tables = self
+                                .tables
+                                .iter()
+                                .map(|tbl| json_object(tbl, true))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            Some(format!("select {}", tables).into())
+                        } else {
+                            // TODO match up table names from self.tables
+                            // TODO with field names from T struct
+                            // TODO they should be in the same order?
+                            let keys = T::column_names();
+                            let x = keys
+                                .iter()
+                                .zip(&self.tables)
+                                .map(|(x, y)| format!("'{}', {}", x, json_object(&y, false)))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            Some(format!("select json_object({})", x).into())
+                        }
+                    }
+                }
+                None => None,
+            },
+            SelectClause::Sql(s) => Some(s.clone().into()),
+            SelectClause::None => None,
+        };
+        let from: Option<Arc<str>> = match &self.from {
+            Some(Tbl { table_name, .. }) => match table_name {
+                Some(table_name) => Some(format!("from {}", table_name).into()),
+                None => None,
+            },
+            _ => None,
+        };
+        let inner_joins: Option<Arc<str>> = if let Some(inner_joins) = &self.inner_joins {
+            Some(inner_joins.clone().into())
+        } else {
+            None
+        };
+
         vec![
-            self.select.clone(),
-            self.from.clone(),
+            select,
+            from,
             self.insert_into.clone(),
             self.values_sql.clone(),
             self.update.clone(),
             self.set.clone(),
             self.delete.clone(),
+            inner_joins.clone(),
             self.r#where.clone(),
             self.group_by.clone(),
             self.order.clone(),
@@ -681,19 +845,44 @@ impl<'a> Query<'a> {
         .into()
     }
 
-    pub async fn all<T>(&self) -> Result<Vec<T>, Error>
+    pub async fn all<T>(self) -> Result<Vec<T>, Error>
     where
-        T: DeserializeOwned + Send + Sync + 'static,
+        T: Row + DeserializeOwned + Send + Sync + 'static,
     {
-        let rows = rows(&self.connection, self.sql_statement()).await?;
+        // if let Some(ref select) = self.select {
+        //     if "select *" == select {
+        //         if !self.joins.is_empty() {
+        //             let joins = self
+        //                 .joins
+        //                 .iter()
+        //                 .map(json_object)
+        //                 .collect::<Vec<_>>()
+        //                 .join(",");
+        //             let from = match self.from.as_ref() {
+        //                 Some(from) => json_object(from),
+        //                 None => "".to_owned(),
+        //             };
+        //             self.select = Some(format!("select {}, {}", joins, from));
+        //             println!("{}", self.sql_statement().clause);
+        //         } else {
+        //             let from = match self.from.as_ref() {
+        //                 Some(from) => json_object(from),
+        //                 None => "".to_owned(),
+        //             };
+        //             self.select = Some(format!("select {}", from))
+        //         }
+        //     }
+        // };
+
+        let rows = rows(&self.connection, self.sql_statement::<T>()).await?;
         Ok(rows)
     }
 
     pub async fn first<T>(&self) -> Result<T, Error>
     where
-        T: DeserializeOwned + Send + Sync + 'static,
+        T: Row + DeserializeOwned + Send + Sync + 'static,
     {
-        let row = rows::<T>(&self.connection, self.sql_statement())
+        let row = rows::<T>(&self.connection, self.sql_statement::<T>())
             .await?
             .into_iter()
             .nth(0)
@@ -703,14 +892,18 @@ impl<'a> Query<'a> {
 
     pub async fn prepare<T>(self, connection: tokio_rusqlite::Connection) -> Result<Prep<T>, Error>
     where
-        T: DeserializeOwned + Send + Sync + 'static,
+        T: Row + DeserializeOwned + Send + Sync + 'static,
     {
-        let prep = prepare::<T>(&connection, self.sql_statement()).await?;
+        let prep = prepare::<T>(&connection, self.sql_statement::<T>()).await?;
         Ok(prep)
     }
 
     pub fn insert(mut self, table: &impl Table) -> Self {
         self.insert_into = Some(format!("insert into {}", table.table_name()).into());
+        self.tables.push(Tbl {
+            table_name: Some(table.table_name()),
+            column_names: table.column_names(),
+        });
         self
     }
 
@@ -756,8 +949,9 @@ impl<'a> Query<'a> {
         Ok(self)
     }
 
-    pub fn update(mut self, table: &impl Table) -> Self {
+    pub fn update(mut self, table: &'a dyn Table) -> Self {
         self.update = Some(format!("update {}", table.table_name()).into());
+        self.tables.push(table.into());
         self
     }
 
@@ -777,39 +971,48 @@ impl<'a> Query<'a> {
         Ok(self)
     }
 
-    pub fn delete(mut self, table: &impl Table) -> Self {
+    pub fn delete(mut self, table: &'a dyn Table) -> Self {
         self.delete = Some(format!("delete from {}", table.table_name()).into());
+        self.tables.push(table.into());
         self
     }
 
-    pub async fn returning<T: Serialize + DeserializeOwned + Send + Sync + 'static>(
+    pub async fn returning<T: Row + Serialize + DeserializeOwned + Send + Sync + 'static>(
         mut self,
     ) -> Result<T, Error> {
-        self.returning = Some("returning *".into());
-        let rows = rows::<T>(&self.connection, self.sql_statement()).await?;
+        let tables = self
+            .tables
+            .iter()
+            .map(|tbl| json_object(tbl, true))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.returning = Some(format!("returning {}", tables).into());
+
+        let rows = rows::<T>(&self.connection, self.sql_statement::<T>()).await?;
         if let Some(row) = rows.into_iter().nth(0) {
             Ok(row)
         } else {
             Err(Error::InsertError(format!(
                 "failed to insert {}",
-                self.sql_statement().clause
+                self.sql_statement::<T>().clause
             )))
         }
     }
 
     pub async fn rows_affected(&self) -> Result<usize, Error> {
-        let rows_affected = execute(&self.connection, self.sql_statement()).await?;
+        let rows_affected = execute(&self.connection, self.sql_statement::<usize>()).await?;
         Ok(rows_affected)
     }
 
-    pub fn select_with(mut self, sql: Sql) -> Query<'a> {
-        self.select = Some(format!("select {}", sql.clause).into());
-        self
-    }
+    // pub fn count(mut self) -> Query<'a> {
+    //     self.select = Some(format!("select count(*) as count").into());
+    //     self
+    // }
+}
 
-    pub fn count(mut self) -> Query<'a> {
-        self.select = Some(format!("select count(*) as count").into());
-        self
+impl Row for usize {
+    fn column_names() -> Vec<&'static str> {
+        vec![]
     }
 }
 
@@ -929,6 +1132,13 @@ pub fn eq(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     }
 }
 
+pub fn on(left: impl ToColumn, right: impl ToColumn) -> Sql {
+    Sql {
+        clause: format!("on {} = {}", left.to_column(), right.to_column()),
+        params: vec![],
+    }
+}
+
 pub fn gt(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     Sql {
         clause: format!("{} > ?", left.to_column()),
@@ -1044,11 +1254,17 @@ pub trait Table {
     where
         Self: Sized + Clone;
     fn table_name(&self) -> &'static str;
+    fn struct_name(&self) -> &'static str;
+    fn column_names(&self) -> Vec<&'static str>;
     fn create_table_sql(&self) -> &'static str;
     fn drop_table_sql(&self) -> &'static str;
     fn add_column_sql(&self, column_name: &str) -> String;
     fn create_index_sql(&self, unique: bool, column_names: Vec<&str>) -> String;
     fn drop_index_sql(&self, column_names: Vec<&str>) -> String;
+}
+
+pub trait Row {
+    fn column_names() -> Vec<&'static str>;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1071,6 +1287,14 @@ pub enum Error {
     Sql(String),
     #[error("could not find the row")]
     RowNotFound,
+    #[error("could not deserialize rows {0}")]
+    Deserialize(String),
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Deserialize(value.to_string())
+    }
 }
 
 impl From<tokio_rusqlite::Error> for Error {
@@ -1113,7 +1337,7 @@ impl From<rusqlite::Error> for Error {
     fn from(value: rusqlite::Error) -> Self {
         match value {
             rusqlite::Error::ToSqlConversionFailure(err) => Self::SqlConversion(err.to_string()),
-            _ => todo!(),
+            err => Self::Deserialize(err.to_string()),
         }
     }
 }
@@ -1234,11 +1458,12 @@ mod tests {
         }
 
         #[row]
+        #[derive(PartialEq, Clone)]
         struct Comment {
             id: u64,
             body: String,
+            #[serde(default)]
             post_id: u64,
-            post_body: Option<String>,
         }
 
         let db = Database::new(Connection::default(":memory:")).await?;
@@ -1260,7 +1485,6 @@ mod tests {
 
         assert_eq!(inserted_post, new_post);
 
-        // update posts set body = ?, id = ? where id = ?
         let updated_post: Post = db
             .update(posts)
             .set(Post {
@@ -1274,7 +1498,6 @@ mod tests {
         inserted_post.body = "post".into();
         assert_eq!(updated_post, inserted_post);
 
-        // delete from posts where id = ? returning *
         let deleted_post: Post = db
             .delete_from(posts)
             .r#where(eq(posts.id, 1))
@@ -1282,6 +1505,60 @@ mod tests {
             .await?;
 
         assert_eq!(deleted_post, inserted_post);
+
+        let inserted_post: Post = db
+            .insert(posts)
+            .values(new_post.clone())?
+            .returning()
+            .await?;
+
+        let new_comment = Comment {
+            id: 1,
+            body: "".into(),
+            post_id: 1,
+        };
+
+        let comment: Comment = db
+            .insert(comments)
+            .values(new_comment.clone())?
+            .returning()
+            .await?;
+
+        let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.into_iter().nth(0).unwrap(), new_comment);
+
+        let query = db
+            .select((comments.id, comments.body))
+            .from(comments)
+            .r#where(eq(comments.id, 1))
+            .limit(1);
+
+        let rows: Vec<Comment> = query.all().await?;
+
+        assert_eq!(rows.len(), 1);
+
+        let comment = rows.into_iter().nth(0).unwrap();
+        assert_eq!(comment.id, new_comment.id);
+        assert_eq!(comment.body, new_comment.body);
+        assert_eq!(comment.post_id, 0);
+
+        #[row]
+        struct CommentWithPost {
+            comment: Comment,
+            post: Post,
+        }
+
+        let rows: Vec<CommentWithPost> = db
+            .select(())
+            .from(comments)
+            .inner_join(posts, on(posts.id, comments.post_id))
+            .all()
+            .await?;
+
+        assert_eq!(rows[0].comment, new_comment);
+        assert_eq!(rows[0].post, new_post);
 
         Ok(())
     }
