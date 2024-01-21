@@ -102,8 +102,8 @@ async fn main() -> Result<(), rizz::Error> {
 
     #[row]
     struct CommentWithPost {
-        comments: Comment,
-        posts: Post
+        comment: Comment,
+        post: Post
     }
 
     // select ... from comments inner join posts on posts.id = comments.post_id
