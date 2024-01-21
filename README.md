@@ -2,8 +2,6 @@
 
 rizz is an automatic migration generator and query builder for sqlite for rust. Don't call it an orm.
 
-*May or may not be inspired by [drizzle](https://github.com/drizzle-team/drizzle-orm)*
-
 # Install
 
 ```sh
