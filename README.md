@@ -56,8 +56,11 @@ struct Comment {
     #[serde(default)]
     post_id: u64,
 }
+```
 
-# Connect to your db
+# Query your db
+
+```rust
 
 #[tokio::main]
 async fn main() -> Result<(), rizz::Error> {
