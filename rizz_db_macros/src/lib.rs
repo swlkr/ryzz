@@ -65,7 +65,7 @@ fn row_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         .collect::<Vec<_>>();
 
     Ok(quote! {
-        impl rizz::Row for #struct_name {
+        impl rizz_db::Row for #struct_name {
             fn column_names() -> Vec<&'static str> {
                 vec![#(#columns,)*]
             }
@@ -87,41 +87,43 @@ impl Parse for Args {
 
 #[proc_macro_attribute]
 pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let mut item_struct = parse_macro_input!(input as ItemStruct);
-    let item_struct1 = item_struct.clone();
-    let table_idents = item_struct1
+    let item_struct = parse_macro_input!(input as ItemStruct);
+    let table_idents = item_struct
         .fields
         .iter()
         .map(|Field { ty, .. }| ty)
         .collect::<Vec<_>>();
-    let initialize_lines = item_struct1
+    let initialize_lines = item_struct
         .fields
         .iter()
         .map(|Field { ty, ident, .. }| {
             quote! { #ident: #ty::new() }
         })
         .collect::<Vec<_>>();
-    match item_struct.fields {
-        syn::Fields::Named(ref mut fields) => fields.named.push(
-            Field::parse_named
-                .parse2(quote! { connection: tokio_rusqlite::Connection })
-                .unwrap(),
-        ),
-        _ => {}
-    };
 
     let ident = &item_struct.ident;
 
     let output = quote! {
+        static RIZZ_CONNECTION: std::sync::OnceLock<tokio_rusqlite::Connection> = std::sync::OnceLock::new();
+
         #[derive(Debug, Clone)]
         #item_struct
 
-        impl Based for #ident {
-            async fn new(connection: rizz::Connection) -> Result<Self, rizz::Error> {
-                let connection = connection.open().await?;
+        impl #ident {
+            async fn new(s: &str) -> core::result::Result<Self, rizz_db::Error> {
+                let connection = rizz_db::Connection::default(s);
+
+                let db = Self::with(connection).await?;
+
+                Ok(db)
+            }
+
+            async fn with(c: rizz_db::Connection) -> core::result::Result<Self, rizz_db::Error> {
+                let connection = c.open().await?;
+                RIZZ_CONNECTION.set(connection).expect("Could not store connection");
 
                 let db = Self {
-                    connection,
+                    // connection,
                     #(#initialize_lines,)*
                 };
 
@@ -130,13 +132,111 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
                 Ok(db)
             }
 
-            fn tables() -> Vec<Box<dyn rizz::Table + 'static>> {
+            fn tables() -> Vec<Box<dyn rizz_db::Table + 'static>> {
                 vec![#(Box::new(#table_idents::new()),)*]
             }
 
-            fn connection(&self) -> &tokio_rusqlite::Connection {
-                &self.connection
+            fn connection(&self) -> &'static tokio_rusqlite::Connection {
+                RIZZ_CONNECTION.get().expect("Failed to acquire connection")
             }
+
+            async fn migrate(&self) -> core::result::Result<usize, rizz_db::Error> {
+                let sqlite_schema = rizz_db::SqliteSchema::new();
+
+                let table_names: Vec<rizz_db::TableName> = self
+                    .select(())
+                    .from(&sqlite_schema)
+                    .r#where(eq(sqlite_schema.r#type, "table"))
+                    .all::<rizz_db::TableName>()
+                    .await?;
+
+                let db_table_names = table_names
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<std::collections::HashSet<_>>();
+
+                let tables = Self::tables();
+                let table_names = tables
+                    .iter()
+                    .map(|t| t.table_name())
+                    .collect::<std::collections::HashSet<_>>();
+
+                let tables_to_create = table_names
+                    .difference(&db_table_names)
+                    .flat_map(|x| {
+                        tables
+                            .iter()
+                            .filter(|t| t.table_name() == *x)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+
+                if !tables_to_create.is_empty() {
+                    println!("=== Creating tables ===");
+                    let statements = tables_to_create
+                        .iter()
+                        .map(|x| x.create_table_sql())
+                        .collect::<Vec<_>>();
+                    let _ = self
+                        .execute_batch(&format!("BEGIN;{}COMMIT;", statements.join(";")))
+                        .await?;
+                    for statement in statements {
+                        println!("{}", statement);
+                    }
+                    println!("=== Create tables finished successfully ===");
+                }
+
+                let tables_to_drop = db_table_names
+                    .difference(&table_names)
+                    .flat_map(|x| {
+                        tables
+                            .iter()
+                            .filter(|t| t.table_name() == *x)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                if !tables_to_drop.is_empty() {
+                    println!("=== Drop tables ===");
+                    tables_to_drop
+                        .iter()
+                        .map(|t| t.drop_table_sql())
+                        .collect::<Vec<_>>()
+                        .join(";");
+                    println!("=== Drop tables finished successfully ===");
+                }
+
+                Ok(tables_to_create.len() + tables_to_drop.len())
+            }
+
+            pub async fn execute_batch(&self, sql: &str) -> core::result::Result<(), rizz_db::Error> {
+                let sql: std::sync::Arc<str> = sql.into();
+                self.connection()
+                    .call(move |conn| conn.execute_batch(&sql))
+                    .await?;
+
+                Ok(())
+            }
+
+            pub async fn query<T: serde::de::DeserializeOwned + Send + 'static>(&self, sql: Sql) -> core::result::Result<Vec<T>, rizz_db::Error> {
+                rizz_db::rows::<T>(&self.connection(), sql).await
+            }
+
+            pub fn select(&self, columns: impl Select) -> Query {
+                Query::new(&self.connection()).select(columns)
+            }
+
+            pub fn insert(&self, table: &impl Table) -> Query {
+                Query::new(&self.connection()).insert(table)
+            }
+
+            pub fn delete_from<'a>(&'a self, table: &'a dyn Table) -> Query<'a> {
+                Query::new(&self.connection()).delete(table)
+            }
+
+            pub fn update<'a>(&'a self, table: &'a dyn Table) -> Query<'a> {
+                Query::new(&self.connection()).update(table)
+            }
+
         }
     };
 
@@ -302,7 +402,7 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
     let drop_table_sql = format!("drop table if exists {};", table_name);
     let struct_string = struct_name.to_string();
     Ok(quote! {
-        impl rizz::Table for #struct_name {
+        impl rizz_db::Table for #struct_name {
             fn new() -> Self {
                 Self {
                     #(#attrs,)*
@@ -358,9 +458,9 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             }
         }
 
-        impl rizz::ToSql for #struct_name {
-            fn to_sql(&self) -> rizz::Value {
-                rizz::Value::Lit(self.table_name())
+        impl rizz_db::ToSql for #struct_name {
+            fn to_sql(&self) -> rizz_db::Value {
+                rizz_db::Value::Lit(self.table_name())
             }
         }
     })
