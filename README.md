@@ -58,7 +58,6 @@ struct Comment {
 # Insert, update and delete
 
 ```rust
-
 #[tokio::main]
 async fn main() -> Result<(), rizz::Error> {
     // automatically migrates tables and columns
@@ -89,10 +88,17 @@ async fn main() -> Result<(), rizz::Error> {
 
     // delete from posts where id = ? returning *
     let deleted_post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
+}
 ```
 
 # Querying
 ```rust
+#[tokio::main]
+async fn main() -> Result<(), rizz::Error> {
+    // automatically migrates tables and columns
+    let db = Database::new("db.sqlite3").await?;
+
+    let Database { posts, comments, .. } = &db;
     // select ... from comments
     let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
