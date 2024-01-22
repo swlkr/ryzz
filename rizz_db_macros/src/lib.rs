@@ -132,7 +132,7 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
                 Ok(db)
             }
 
-            fn tables() -> Vec<Box<dyn rizz_db::Table + 'static>> {
+            fn tables() -> Vec<Box<dyn rizz_db::Table + Send + Sync + 'static>> {
                 vec![#(Box::new(#table_idents::new()),)*]
             }
 

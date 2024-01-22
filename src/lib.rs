@@ -907,7 +907,7 @@ impl From<Option<u16>> for Value {
 pub trait Table {
     fn new() -> Self
     where
-        Self: Sized + Clone;
+        Self: Sized + Clone + Send + Sync;
     fn table_name(&self) -> &'static str;
     fn struct_name(&self) -> &'static str;
     fn column_names(&self) -> Vec<&'static str>;
