@@ -87,7 +87,7 @@ async fn main() -> Result<(), rizz::Error> {
         .await?;
 
     // delete from posts where id = ? returning *
-    let deleted_post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
+    let deleted_post: Post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
 
 Ok(())
 }
