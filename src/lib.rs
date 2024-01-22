@@ -6,7 +6,7 @@ pub use rizz_db_macros::{database, row, table, Row, Table};
 use rusqlite::OpenFlags;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashSet;
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 #[macro_export]
 macro_rules! sql {
@@ -561,27 +561,6 @@ async fn rows<T: DeserializeOwned + Send + 'static>(
     Ok(results)
 }
 
-async fn prepare<T: DeserializeOwned + Send + Sync + 'static>(
-    connection: &tokio_rusqlite::Connection,
-    sql: Sql,
-) -> Result<Prep<T>, Error> {
-    let cloned = connection.clone();
-    let prep = connection
-        .call(move |conn| {
-            // this uses an internal Lru cache within rusqlite
-            // and uses the sql as the key to the cache
-            // not ideal but what can you do?
-            let _ = conn.prepare_cached(&sql.clause)?;
-            Ok(Prep {
-                connection: cloned,
-                sql,
-                phantom: PhantomData::default(),
-            })
-        })
-        .await?;
-    Ok(prep)
-}
-
 pub fn asc(col: impl ToColumn) -> Sql {
     Sql {
         clause: format!("{} asc", col.to_column()).into(),
@@ -864,12 +843,22 @@ impl<'a> Query<'a> {
         Ok(row)
     }
 
-    pub async fn prepare<T>(self, connection: tokio_rusqlite::Connection) -> Result<Prep<T>, Error>
-    where
-        T: Row + DeserializeOwned + Send + Sync + 'static,
-    {
-        let prep = prepare::<T>(&connection, self.sql_statement::<T>()).await?;
-        Ok(prep)
+    pub async fn prepare<T: Row + DeserializeOwned + Send + Sync + 'static>(
+        self,
+    ) -> Result<Self, Error> {
+        let sql = self.sql_statement::<T>();
+        self.connection
+            .call(move |conn| {
+                // this uses an internal Lru cache within rusqlite
+                // and uses the sql as the key to the cache
+                // not ideal but what can you do?
+                let _ = conn.prepare_cached(&sql.clause)?;
+
+                Ok(())
+            })
+            .await?;
+
+        Ok(self)
     }
 
     pub fn insert(mut self, table: &impl Table) -> Self {
@@ -992,41 +981,6 @@ impl Row for usize {
 
 pub fn placeholder() -> &'static str {
     "?"
-}
-
-#[allow(unused)]
-#[derive(Clone, Debug)]
-pub struct Prep<T>
-where
-    T: DeserializeOwned + Send + Sync + 'static,
-{
-    connection: tokio_rusqlite::Connection,
-    sql: Sql,
-    phantom: PhantomData<T>,
-}
-
-#[allow(unused)]
-impl<T> Prep<T>
-where
-    T: DeserializeOwned + Send + Sync + 'static,
-{
-    pub async fn all(&self, params: Vec<Value>) -> Result<Vec<T>, Error> {
-        let sql = Sql {
-            clause: self.sql.clause.clone(),
-            params,
-        };
-        let rows = rows::<T>(&self.connection, sql).await?;
-        Ok(rows)
-    }
-
-    pub async fn one(&self, params: Vec<Value>) -> Result<T, Error> {
-        let sql = Sql {
-            clause: self.sql.clause.clone(),
-            params,
-        };
-        let rows = rows::<T>(&self.connection, sql).await?;
-        rows.into_iter().nth(0).ok_or(Error::RowNotFound)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1532,6 +1486,18 @@ mod tests {
 
         assert_eq!(rows[0].comment, new_comment);
         assert_eq!(rows[0].post, new_post);
+
+        let query = db.select(()).from(comments);
+
+        // prepare the query
+        let prepared = query.prepare::<Comment>().await?;
+
+        // execute the prepared query later
+        let rows: Vec<Comment> = prepared.all().await?;
+
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[0].body, "");
+        assert_eq!(rows[0].post_id, 1);
 
         Ok(())
     }
