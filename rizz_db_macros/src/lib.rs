@@ -2,8 +2,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
 use syn::{
-    parse::Parse, parse::Parser, parse_macro_input, DeriveInput, Expr, ExprAssign, ExprLit,
-    ExprPath, Field, ItemStruct, Lit, LitStr, PathSegment, Result,
+    parse::Parse, parse_macro_input, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath, Field,
+    ItemStruct, Lit, LitStr, PathSegment, Result,
 };
 
 #[proc_macro_attribute]
