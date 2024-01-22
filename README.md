@@ -55,7 +55,7 @@ struct Comment {
 }
 ```
 
-# Query your db
+# Insert, update and delete
 
 ```rust
 
@@ -65,8 +65,6 @@ async fn main() -> Result<(), rizz::Error> {
     let db = Database::new("db.sqlite3").await?;
 
     let Database { posts, comments, .. } = &db;
-
-    // Inserting, updating, and deleting rows
 
     // insert into posts (id, body) values (?, ?) returning *
     let inserted_post: Post = db
@@ -91,9 +89,10 @@ async fn main() -> Result<(), rizz::Error> {
 
     // delete from posts where id = ? returning *
     let deleted_post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
+```
 
-    // querying
-
+# Querying
+```rust
     // select ... from comments
     let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
