@@ -115,16 +115,15 @@ let rows: Vec<CommentWithPost> = db
     .inner_join(posts, on(posts.id, comments.post_id))
     .all()
     .await?;
+```
 
-// prepared statements
+# Prepared Statements
 
-// select ... from comments
+```rust
 let query = db.select(()).from(comments);
 
-// prepare the query
-let prepared = query.prepare_as::<Comment>();
+let prepared = query.prepare::<Comment>();
 
-// execute the prepared query later
 let rows: Vec<Comment> = prepared.all().await?;
 ```
 
@@ -132,6 +131,7 @@ let rows: Vec<Comment> = prepared.all().await?;
 
 ```rust
 let ix = index("posts_id_body_ix").unique().on(posts, (posts.id, posts.body));
+
 // create unique index if not exists posts_id_body_ix on posts (id, body);
 db.create(&ix).await?;
 
