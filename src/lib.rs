@@ -150,6 +150,24 @@ impl Select for () {
     }
 }
 
+impl<A> Select for A
+where
+    A: ToColumn,
+{
+    fn columns(&self) -> Vec<&'static str> {
+        vec![self.to_column()]
+    }
+
+    fn clause(&self) -> SelectClause {
+        let tbl = Tbl {
+            table_name: None,
+            column_names: self.columns(),
+        };
+
+        SelectClause::Sql(format!("select {}", json_object(&tbl, true)))
+    }
+}
+
 impl<A, B> Select for (A, B)
 where
     A: ToColumn,
@@ -167,6 +185,10 @@ where
 
         SelectClause::Sql(format!("select {}", json_object(&tbl, true)))
     }
+}
+
+fn unqualify(s: &str) -> String {
+    s.split(".").nth(1).unwrap_or(s).replace("\"", "")
 }
 
 #[table("rizz_migrations")]
@@ -338,7 +360,7 @@ fn json_object(tbl: &Tbl, r#as: bool) -> String {
             .iter()
             .map(|col| {
                 // HACK Stop qualifying column names in proc macro
-                let c = col.split(".").nth(1).unwrap_or(col).replace("\"", "");
+                let c = unqualify(&col);
                 format!(r#"'{}', {}"#, c, column_name(tbl.table_name, col))
             })
             .collect::<Vec<_>>()
@@ -1072,6 +1094,56 @@ pub struct Schema {
     pub indices: Vec<(&'static str, &'static str)>,
 }
 
+pub struct Index<'a> {
+    unique: bool,
+    name: &'a str,
+    table: &'a str,
+    columns: String,
+}
+
+impl<'a> Index<'a> {
+    fn new(name: &'a str) -> Self {
+        Self {
+            unique: false,
+            name,
+            table: "",
+            columns: String::default(),
+        }
+    }
+
+    pub fn to_sql(&self) -> String {
+        format!(
+            "{}index if not exists {} on {} ({})",
+            if self.unique { "unique " } else { "" },
+            self.name,
+            self.table,
+            self.columns
+        )
+    }
+
+    pub fn unique(mut self) -> Self {
+        self.unique = true;
+
+        self
+    }
+
+    pub fn on(mut self, table: &'a impl Table, columns: impl Select) -> Self {
+        self.columns = columns
+            .columns()
+            .into_iter()
+            .map(unqualify)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.table = table.table_name();
+
+        self
+    }
+}
+
+pub fn index<'a>(name: &'a str) -> Index<'a> {
+    Index::new(name)
+}
+
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -1226,6 +1298,59 @@ mod tests {
         assert_eq!(rows[0].body, "");
         assert_eq!(rows[0].post_id, 1);
 
+        Ok(())
+    }
+
+    #[allow(unused)]
+    #[tokio::test]
+    async fn indexes_works() -> Result<(), rizz_db::Error> {
+        use rizz_db::*;
+
+        #[database]
+        struct Database {
+            links: Links,
+        }
+
+        #[table("links")]
+        struct Links {
+            #[rizz(primary_key)]
+            id: Integer,
+
+            #[rizz(not_null)]
+            url: Text,
+        }
+
+        #[row]
+        struct Link {
+            id: i64,
+            url: String,
+        }
+
+        let db = Database::new(":memory:").await?;
+        let Database { links } = &db;
+
+        db.create(index("todos_content").unique().on(links, links.url))
+            .await?;
+
+        let rows = db
+            .insert(links)
+            .values(Link {
+                id: 1,
+                url: "".into(),
+            })?
+            .rows_affected()
+            .await?;
+        assert_eq!(rows, 1);
+        let result = db
+            .insert(links)
+            .values(Link {
+                id: 2,
+                url: "".into(),
+            })?
+            .rows_affected()
+            .await;
+        let links: Vec<Link> = db.select(()).from(links).all().await?;
+        assert!(result.is_err());
         Ok(())
     }
 }

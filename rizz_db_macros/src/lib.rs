@@ -237,6 +237,15 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
                 Query::new(&self.connection()).update(table)
             }
 
+            pub async fn create<'a>(&'a self, index: rizz_db::Index<'a>) -> core::result::Result<(), rizz_db::Error> {
+                let sql = format!("create {};", index.to_sql());
+                println!("=== Creating index ===");
+                println!("{}", sql);
+                self.execute_batch(&sql).await?;
+                println!("=== Successfully created index ===");
+
+                Ok(())
+            }
         }
     };
 
