@@ -63,7 +63,7 @@ async fn main() -> Result<(), rizz::Error> {
     // automatically migrates tables and columns
     let db = Database::new("db.sqlite3").await?;
 
-    let Database { posts, comments, .. } = &db;
+    let Database { posts, comments } = &db;
 
     // insert into posts (id, body) values (?, ?) returning *
     let inserted_post: Post = db
@@ -94,44 +94,48 @@ Ok(())
 ```
 
 # Querying
+
 ```rust
-#[tokio::main]
-async fn main() -> Result<(), rizz::Error> {
-    // automatically migrates tables and columns
-    let db = Database::new("db.sqlite3").await?;
+// select ... from comments
+let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
-    let Database { posts, comments, .. } = &db;
-    // select ... from comments
-    let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
+// select ... from comments
+let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await?;
 
-    // select ... from comments
-    let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await?;
-
-    #[row]
-    struct CommentWithPost {
-        comment: Comment,
-        post: Post
-    }
-
-    // select ... from comments inner join posts on posts.id = comments.post_id
-    let rows: Vec<CommentWithPost> = db
-        .select(())
-        .from(comments)
-        .inner_join(posts, on(posts.id, comments.post_id))
-        .all()
-        .await?;
-
-    // prepared statements
-
-    // select ... from comments
-    let query = db.select(()).from(comments);
-
-    // prepare the query
-    let prepared = query.prepare_as::<Comment>();
-
-    // execute the prepared query later
-    let rows: Vec<Comment> = prepared.all().await?;
-
-    Ok(())
+#[row]
+struct CommentWithPost {
+    comment: Comment,
+    post: Post
 }
+
+// select ... from comments inner join posts on posts.id = comments.post_id
+let rows: Vec<CommentWithPost> = db
+    .select(())
+    .from(comments)
+    .inner_join(posts, on(posts.id, comments.post_id))
+    .all()
+    .await?;
+
+// prepared statements
+
+// select ... from comments
+let query = db.select(()).from(comments);
+
+// prepare the query
+let prepared = query.prepare_as::<Comment>();
+
+// execute the prepared query later
+let rows: Vec<Comment> = prepared.all().await?;
+```
+
+# Manage Indexes/Indices (same thing)
+
+```rust
+let ix = index("posts_id_body_ix").unique().on(posts, (posts.id, posts.body));
+// create unique index if not exists posts_id_body_ix on posts (id, body);
+db.create(&ix).await?;
+
+// drop index if exists posts_id_body_ix;
+db.drop(&ix).await?;
+
 ```
