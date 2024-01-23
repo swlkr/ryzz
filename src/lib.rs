@@ -9,7 +9,7 @@ pub use tokio_rusqlite;
 
 #[derive(Clone, Debug)]
 pub struct Connection {
-    path: Arc<str>,
+    path: std::rc::Rc<str>,
     open_flags: OpenFlags,
     pragma: Option<String>,
 }
@@ -24,12 +24,10 @@ impl Connection {
     }
 
     pub fn default(path: &str) -> Self {
-        let c = Self::new(path)
+        Self::new(path)
             .foreign_keys(true)
             .journal_mode(JournalMode::Wal)
-            .synchronous(Synchronous::Normal);
-
-        c
+            .synchronous(Synchronous::Normal)
     }
 
     pub fn create_if_missing(mut self, arg: bool) -> Self {
