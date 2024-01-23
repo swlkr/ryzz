@@ -1,6 +1,6 @@
 # rizz_db
 
-rizz_db is an automatic migration generator and query builder for sqlite for rust. Don't call it an orm.
+rizz_db is an automatic migration generator and query builder for sqlite in rust. Don't call it an orm.
 
 # Install
 
