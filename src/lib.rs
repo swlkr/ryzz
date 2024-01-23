@@ -1192,7 +1192,6 @@ mod tests {
         struct Comment {
             id: u64,
             body: String,
-            #[serde(default)]
             post_id: u64,
         }
 

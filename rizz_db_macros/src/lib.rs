@@ -2,16 +2,31 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
 use syn::{
-    parse::Parse, parse_macro_input, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath, Field,
-    ItemStruct, Lit, LitStr, PathSegment, Result,
+    parse::Parse, parse_macro_input, Attribute, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath,
+    Field, ItemStruct, Lit, LitStr, PathSegment, Result,
 };
 
 #[proc_macro_attribute]
 pub fn row(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let input: TokenStream2 = input.into();
+    let input1 = input.clone();
+    let mut item_struct = parse_macro_input!(input1 as ItemStruct);
+    for field in &mut item_struct.fields {
+        if field.attrs.iter().any(|attr| {
+            let ident = if let Some(segment) = attr.path.segments.last() {
+                segment.ident.to_string()
+            } else {
+                "".into()
+            };
+            ident == "serde" && attr.tokens.to_string() == "(default)"
+        }) {
+        } else {
+            let attr: Attribute = syn::parse_quote! { #[serde(default)] };
+            field.attrs.push(attr);
+        }
+    }
     let output = quote! {
-        #[derive(Row, serde::Serialize, serde::Deserialize, Debug)]
-        #input
+        #[derive(Row, Default, serde::Serialize, serde::Deserialize, Debug)]
+        #item_struct
     };
 
     output.into()
