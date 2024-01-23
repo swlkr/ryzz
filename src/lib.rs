@@ -1107,18 +1107,22 @@ impl<'a> Index<'a> {
             unique: false,
             name,
             table: "",
-            columns: String::default(),
+            columns: "".into(),
         }
     }
 
-    pub fn to_sql(&self) -> String {
+    pub fn to_create_sql(&self) -> String {
         format!(
-            "{}index if not exists {} on {} ({})",
+            "create {}index if not exists {} on {} ({});",
             if self.unique { "unique " } else { "" },
             self.name,
             self.table,
             self.columns
         )
+    }
+
+    pub fn to_drop_sql(&self) -> String {
+        format!("drop index if exists {};", self.name)
     }
 
     pub fn unique(mut self) -> Self {
@@ -1329,8 +1333,9 @@ mod tests {
         let db = Database::new(":memory:").await?;
         let Database { links } = &db;
 
-        db.create(index("todos_content").unique().on(links, links.url))
-            .await?;
+        let links_url_ix = index("links_url_ix").unique().on(links, links.url);
+
+        db.create(&links_url_ix).await?;
 
         let rows = db
             .insert(links)
@@ -1340,7 +1345,9 @@ mod tests {
             })?
             .rows_affected()
             .await?;
+
         assert_eq!(rows, 1);
+
         let result = db
             .insert(links)
             .values(Link {
@@ -1349,8 +1356,26 @@ mod tests {
             })?
             .rows_affected()
             .await;
-        let links: Vec<Link> = db.select(()).from(links).all().await?;
+
         assert!(result.is_err());
+
+        db.drop(&links_url_ix).await?;
+
+        let result = db
+            .insert(links)
+            .values(Link {
+                id: 2,
+                url: "".into(),
+            })?
+            .rows_affected()
+            .await;
+
+        assert!(result.is_ok());
+
+        let rows = db.select(()).from(links).all::<Link>().await?;
+
+        assert_eq!(rows.len(), 2);
+
         Ok(())
     }
 }
