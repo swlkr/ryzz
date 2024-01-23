@@ -58,39 +58,34 @@ struct Comment {
 # Insert, update and delete
 
 ```rust
-#[tokio::main]
-async fn main() -> Result<(), rizz::Error> {
-    // automatically migrates tables and columns
-    let db = Database::new("db.sqlite3").await?;
+// automatically migrates tables and columns
+let db = Database::new("db.sqlite3").await?;
 
-    let Database { posts, comments } = &db;
+let Database { posts, comments } = &db;
 
-    // insert into posts (id, body) values (?, ?) returning *
-    let inserted_post: Post = db
-        .insert(posts)
-        .values(Post {
-            id: 1,
-            body: "".into(),
-        })?
-        .returning()
-        .await?;
+// insert into posts (id, body) values (?, ?) returning *
+let inserted_post: Post = db
+    .insert(posts)
+    .values(Post {
+        id: 1,
+        body: "".into(),
+    })?
+    .returning()
+    .await?;
 
-    // update posts set body = ?, id = ? where id = ? returning *
-    let updated_post: Post = db
-        .update(posts)
-        .set(Post {
-            body: "post".into(),
-            ..inserted_post
-        })?
-        .r#where(eq(posts.id, 1))
-        .returning()
-        .await?;
+// update posts set body = ?, id = ? where id = ? returning *
+let updated_post: Post = db
+    .update(posts)
+    .set(Post {
+        body: "post".into(),
+        ..inserted_post
+    })?
+    .r#where(eq(posts.id, 1))
+    .returning()
+    .await?;
 
-    // delete from posts where id = ? returning *
-    let deleted_post: Post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
-
-Ok(())
-}
+// delete from posts where id = ? returning *
+let deleted_post: Post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
 ```
 
 # Querying
@@ -137,5 +132,4 @@ db.create(&ix).await?;
 
 // drop index if exists posts_id_body_ix;
 db.drop(&ix).await?;
-
 ```
