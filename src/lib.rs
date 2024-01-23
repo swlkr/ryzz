@@ -129,6 +129,7 @@ pub struct SqliteSchema {
 }
 
 #[row]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TableName {
     pub name: String,
 }
@@ -1372,6 +1373,39 @@ mod tests {
         let rows = db.select(()).from(links).all::<Link>().await?;
 
         assert_eq!(rows.len(), 2);
+
+        Ok(())
+    }
+
+    #[allow(unused)]
+    #[tokio::test]
+    async fn create_table_migration_works() -> Result<(), rizz_db::Error> {
+        use rizz_db::*;
+
+        #[database]
+        struct Database {
+            links: Links,
+        }
+
+        #[table("links")]
+        struct Links {
+            #[rizz(primary_key)]
+            id: Integer,
+
+            #[rizz(not_null)]
+            url: Text,
+        }
+
+        let connection = Connection::default(":memory:");
+        let db = Database::connect(connection).await?;
+
+        let tables = db.migrate().await?;
+
+        assert_eq!(tables, 1);
+
+        let tables = db.migrate().await?;
+
+        assert_eq!(tables, 0);
 
         Ok(())
     }

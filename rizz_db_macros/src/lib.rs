@@ -128,19 +128,32 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
             async fn new(s: &str) -> core::result::Result<Self, rizz_db::Error> {
                 let connection = rizz_db::Connection::default(s);
 
-                let db = Self::with(connection).await?;
+                let db = Self::connect(connection).await?;
+
+                db.migrate().await?;
+
+                Ok(db)
+            }
+
+            async fn connect(c: rizz_db::Connection) -> core::result::Result<Self, rizz_db::Error> {
+                match RIZZ_CONNECTION.get() {
+                    Some(conn) => {},
+                    None => {
+                        let connection = c.open().await?;
+                        RIZZ_CONNECTION.set(connection).expect("Could not store connection");
+                        RIZZ_CONNECTION.get().expect("Could not retrieve connection");
+                    }
+                };
+
+                let db = Self {
+                    #(#initialize_lines,)*
+                };
 
                 Ok(db)
             }
 
             async fn with(c: rizz_db::Connection) -> core::result::Result<Self, rizz_db::Error> {
-                let connection = c.open().await?;
-                RIZZ_CONNECTION.set(connection).expect("Could not store connection");
-
-                let db = Self {
-                    // connection,
-                    #(#initialize_lines,)*
-                };
+                let db = Self::connect(c).await?;
 
                 db.migrate().await?;
 
@@ -158,31 +171,30 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
             async fn migrate(&self) -> core::result::Result<usize, rizz_db::Error> {
                 let sqlite_schema = rizz_db::SqliteSchema::new();
 
-                let table_names: Vec<rizz_db::TableName> = self
+                let db_table_names = self
                     .select(())
                     .from(&sqlite_schema)
                     .r#where(eq(sqlite_schema.r#type, "table"))
                     .all::<rizz_db::TableName>()
-                    .await?;
-
-                let db_table_names = table_names
-                    .iter()
-                    .map(|t| t.name.as_str())
+                    .await?
+                    .into_iter()
+                    .map(|x| rizz_db::TableName { name: format!("\"{}\"", x.name) })
                     .collect::<std::collections::HashSet<_>>();
 
                 let tables = Self::tables();
                 let table_names = tables
                     .iter()
-                    .map(|t| t.table_name())
+                    .map(|t| rizz_db::TableName { name: t.table_name().to_owned() })
                     .collect::<std::collections::HashSet<_>>();
 
-                let tables_to_create = table_names
-                    .difference(&db_table_names)
-                    .flat_map(|x| {
+                let difference = table_names.difference(&db_table_names);
+
+                let tables_to_create = difference
+                    .into_iter()
+                    .filter_map(|x| {
                         tables
                             .iter()
-                            .filter(|t| t.table_name() == *x)
-                            .collect::<Vec<_>>()
+                            .find(|t| t.table_name() == x.name)
                     })
                     .collect::<Vec<_>>();
 
@@ -201,26 +213,7 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
                     println!("=== Create tables finished successfully ===");
                 }
 
-                let tables_to_drop = db_table_names
-                    .difference(&table_names)
-                    .flat_map(|x| {
-                        tables
-                            .iter()
-                            .filter(|t| t.table_name() == *x)
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-                if !tables_to_drop.is_empty() {
-                    println!("=== Drop tables ===");
-                    tables_to_drop
-                        .iter()
-                        .map(|t| t.drop_table_sql())
-                        .collect::<Vec<_>>()
-                        .join(";");
-                    println!("=== Drop tables finished successfully ===");
-                }
-
-                Ok(tables_to_create.len() + tables_to_drop.len())
+                Ok(tables_to_create.len())
             }
 
             pub async fn execute_batch(&self, sql: &str) -> core::result::Result<(), rizz_db::Error> {
