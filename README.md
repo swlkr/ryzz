@@ -103,11 +103,11 @@ struct CommentWithPost {
 }
 
 // select ... from comments inner join posts on posts.id = comments.post_id
-let rows: Vec<CommentWithPost> = db
+let rows = db
     .select(())
     .from(comments)
-    .inner_join(posts, on(posts.id, comments.post_id))
-    .all()
+    .inner_join(posts, eq(posts.id, comments.post_id))
+    .all::<CommentWithPost>()
     .await?;
 ```
 
