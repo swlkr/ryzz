@@ -178,7 +178,7 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
                     .all::<rizz_db::TableName>()
                     .await?
                     .into_iter()
-                    .map(|x| rizz_db::TableName { name: format!("\"{}\"", x.name) })
+                    .map(|x| rizz_db::TableName { name: x.name })
                     .collect::<std::collections::HashSet<_>>();
 
                 let tables = Self::tables();
@@ -210,10 +210,57 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
                     for statement in statements {
                         println!("{}", statement);
                     }
-                    println!("=== Create tables finished successfully ===");
+                    println!("=== Tables created successfully ===");
                 }
 
-                Ok(tables_to_create.len())
+                let pti = rizz_db::TableInfo::new();
+
+                let db_columns = self
+                    .select(())
+                    .from(&sqlite_schema)
+                    .left_outer_join(&pti, ne(pti.name, sqlite_schema.name))
+                    .r#where(eq(sqlite_schema.r#type, "table"))
+                    .all::<rizz_db::TableInfoRow>()
+                    .await?
+                    .into_iter()
+                    .map(|x| (x.table(), x.column()))
+                    .collect::<std::collections::HashSet<_>>();
+
+                let columns = Self::tables()
+                    .iter()
+                    .flat_map(|t| {
+                        let column_names = t.column_names();
+                        t.column_names()
+                        .into_iter()
+                        .map(|c| (t.table_name().to_string(), c.to_string()))
+                        .collect::<Vec<_>>()
+                    })
+                    .collect::<std::collections::HashSet<_>>();
+
+                let difference = columns.difference(&db_columns);
+                let columns_to_add = difference
+                    .into_iter()
+                    .filter_map(|x| {
+                        match tables.iter().find(|t| t.table_name() == x.0) {
+                            Some(table) => Some(table.add_column_sql(x.1.as_str())),
+                            None => None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                if !columns_to_add.is_empty() {
+                    println!("=== Adding columns ===");
+                    let statements = &columns_to_add;
+                    let _ = self
+                        .execute_batch(&format!("BEGIN;{}COMMIT;", statements.join(";")))
+                        .await?;
+                    for statement in statements {
+                        println!("{}", statement);
+                    }
+                    println!("=== Columns added successfully ===");
+                }
+
+                Ok(tables_to_create.len() + columns_to_add.len())
             }
 
             pub async fn execute_batch(&self, sql: &str) -> core::result::Result<(), rizz_db::Error> {
@@ -298,12 +345,23 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         .attrs
         .iter()
         .filter_map(|attr| attr.parse_args::<RizzAttr>().ok())
+        .filter_map(|ra| ra.table_name)
         .last()
-        .expect("define #![rizz(table = \"your table name here\")] on struct")
-        .table_name
-        .unwrap();
+        .expect("define #![rizz(table = \"your table name here\")] on struct");
+    let table_alias = input
+        .attrs
+        .iter()
+        .filter_map(|attr| attr.parse_args::<RizzAttr>().ok())
+        .filter_map(|ra| ra.r#as)
+        .last();
+
+    let (table_str, table_alias) = match table_alias {
+        Some(x) => (x, quote! { Some(#table_str) }),
+        None => (table_str, quote! { None }),
+    };
+
     let struct_name = input.ident;
-    let table_name = format!(r#""{}""#, table_str.value());
+    let table_name = format!("{}", table_str.value());
     let attrs = match input.data {
         syn::Data::Struct(ref data) => data
             .fields
@@ -321,10 +379,7 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             .collect::<Vec<_>>(),
         _ => unimplemented!(),
     };
-    let column_fields = attrs
-        .iter()
-        .filter(|(_, ty, _)| ty.to_token_stream().to_string() != "Index")
-        .collect::<Vec<_>>();
+    let column_fields = attrs.iter().collect::<Vec<_>>();
     let column_names = attrs
         .iter()
         .map(|(ident, _, attrs)| {
@@ -410,13 +465,12 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
                 None => ident.to_string(),
             };
 
-            let value = format!(r#"{}."{}""#, table_name, name);
+            let value = format!("{}.{}", table_name, name);
             match ty.into_token_stream().to_string().as_str() {
                 "Integer" => quote! { #ident: Integer(#value) },
                 "Blob" => quote! { #ident: Blob(#value) },
                 "Real" => quote! { #ident: Real(#value) },
                 "Text" => quote! { #ident: Text(#value) },
-                "Index" => quote! { #ident: "" },
                 _ => unimplemented!(),
             }
         })
@@ -425,7 +479,6 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         "create table if not exists {} ({});",
         table_name, column_def_sql
     );
-    let drop_table_sql = format!("drop table if exists {};", table_name);
     let struct_string = struct_name.to_string();
     Ok(quote! {
         impl rizz_db::Table for #struct_name {
@@ -443,12 +496,12 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
                 #table_name
             }
 
-            fn create_table_sql(&self) -> &'static str {
-                #create_table_sql
+            fn table_alias(&self) -> Option<&'static str> {
+                #table_alias
             }
 
-            fn drop_table_sql(&self) -> &'static str {
-                #drop_table_sql
+            fn create_table_sql(&self) -> &'static str {
+                #create_table_sql
             }
 
             fn column_names(&self) -> Vec<&'static str> {
@@ -456,31 +509,12 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             }
 
             fn add_column_sql(&self, column_name: &str) -> String {
-                let unqualified_column_name = column_name.split(".").nth(1).expect("column name must be qualified: table.column").replace("\"", "");
                 let column_defs: Vec<String> = vec![#(#column_defs.to_string(),)*];
-                if let Some(column_def) = column_defs.iter().filter(|c| if let Some(name) = &c.split(" ").nth(0) { if name == &unqualified_column_name { true } else { false } } else { false }).nth(0) {
+                if let Some(column_def) = column_defs.iter().filter(|c| if let Some(name) = &c.split(" ").nth(0) { if name == &column_name{ true } else { false } } else { false }).nth(0) {
                     format!("alter table {} add column {};", #table_name, column_def)
                 } else {
-                    panic!("column {} on table {} doesnt exist", unqualified_column_name, #table_name);
+                    panic!("column {} on table {} doesnt exist", column_name, #table_name);
                 }
-            }
-
-            fn create_index_sql(&self, unique: bool, column_names: Vec<&str>) -> String {
-                let bare_column_names = column_names.iter().map(|name| name.split(".").nth(1).expect("column name must be qualified: table.column").replace("\"", "")).collect::<Vec<_>>();
-                let bare_table_name = self.table_name().replace("\"", "");
-                let index_name = format!("{}_{}", &bare_table_name, bare_column_names.join("_"));
-                let sql = format!("create{}index {} on {} ({});", if unique == true { " unique " } else { " " }, index_name, &bare_table_name, bare_column_names.join(","));
-
-                sql
-            }
-
-            fn drop_index_sql(&self, column_names: Vec<&str>) -> String {
-                let bare_column_names = column_names.iter().map(|name| name.split(".").nth(1).expect("column name must be qualified: table.column").replace("\"", "")).collect::<Vec<_>>();
-                let bare_table_name = self.table_name().replace("\"", "");
-                let index_name = format!("{}_{}", bare_table_name, bare_column_names.join("_"));
-                let sql = format!("drop index {};", index_name);
-
-                sql
             }
         }
 
@@ -532,6 +566,9 @@ impl Parse for RizzAttr {
                                 "name" => {
                                     rizz_attr.name = Some(lit_str.clone());
                                 }
+                                "r#as" => {
+                                    rizz_attr.r#as = Some(lit_str.clone());
+                                }
                                 _ => {}
                             }
                         }
@@ -581,4 +618,5 @@ struct RizzAttr {
     to: Option<LitStr>,
     rel: Option<Rel>,
     name: Option<LitStr>,
+    r#as: Option<LitStr>,
 }

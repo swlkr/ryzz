@@ -4,7 +4,7 @@ extern crate self as rizz_db;
 pub use rizz_db_macros::{database, row, table, Row, Table};
 use rusqlite::OpenFlags;
 use serde::{de::DeserializeOwned, Serialize};
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 pub use tokio_rusqlite;
 
 #[derive(Clone, Debug)]
@@ -128,10 +128,40 @@ pub struct SqliteSchema {
     pub r#type: Text,
 }
 
+#[table("pragma_table_info(sqlite_schema.name)")]
+#[rizz(r#as = "pti")]
+pub struct TableInfo {
+    pub name: Text,
+}
+
 #[row]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TableName {
     pub name: String,
+}
+
+#[row]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ColumnName {
+    pub name: String,
+}
+
+#[row]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct TableInfoRow {
+    table_name: TableName,
+    column_name: ColumnName,
+}
+
+#[allow(unused)]
+impl TableInfoRow {
+    pub fn table(&self) -> String {
+        self.table_name.name.clone()
+    }
+
+    pub fn column(&self) -> String {
+        self.column_name.name.clone()
+    }
 }
 
 pub trait Select {
@@ -187,7 +217,7 @@ where
 }
 
 fn unqualify(s: &str) -> String {
-    s.split(".").nth(1).unwrap_or(s).replace("\"", "")
+    s.split(".").nth(1).unwrap_or(s).to_string()
 }
 
 #[table("rizz_migrations")]
@@ -384,6 +414,26 @@ pub enum SelectClause {
     None,
 }
 
+pub enum JoinType {
+    Left,
+    Right,
+    Full,
+    Cross,
+    Inner,
+}
+
+impl Display for JoinType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match &self {
+            JoinType::Left => "left",
+            JoinType::Right => "right",
+            JoinType::Full => "full",
+            JoinType::Cross => "cross",
+            JoinType::Inner => "inner",
+        })
+    }
+}
+
 pub struct Query<'a> {
     connection: &'a tokio_rusqlite::Connection,
     select: SelectClause,
@@ -399,7 +449,7 @@ pub struct Query<'a> {
     update: Option<Arc<str>>,
     order: Option<Arc<str>>,
     group_by: Option<Arc<str>>,
-    inner_joins: Option<String>,
+    joins: Option<String>,
     tables: Vec<Tbl<'a>>,
 }
 
@@ -419,7 +469,7 @@ impl<'a> Query<'a> {
             returning: None,
             order: None,
             group_by: None,
-            inner_joins: None,
+            joins: None,
             tables: vec![],
             connection,
         }
@@ -465,15 +515,26 @@ impl<'a> Query<'a> {
         self
     }
 
-    pub fn inner_join(mut self, table: &impl Table, sql: Sql) -> Self {
-        match self.inner_joins {
-            Some(ref mut inner_joins) => {
-                inner_joins.push_str(&format!("inner join {} {}", table.table_name(), sql.clause))
-            }
-            None => {
-                self.inner_joins =
-                    Some(format!("inner join {} {}", table.table_name(), sql.clause).into())
-            }
+    pub fn join(mut self, join_type: JoinType, outer: bool, table: &impl Table, sql: Sql) -> Self {
+        let clause = format!(
+            "{} {} join {} {} on {}",
+            join_type,
+            if outer { "outer" } else { "" },
+            if let Some(alias) = table.table_alias() {
+                alias
+            } else {
+                table.table_name()
+            },
+            if let Some(_) = table.table_alias() {
+                table.table_name()
+            } else {
+                ""
+            },
+            sql.clause
+        );
+        match self.joins {
+            Some(ref mut joins) => joins.push_str(&clause),
+            None => self.joins = Some(clause.into()),
         }
         self.tables.push(Tbl {
             table_name: Some(table.table_name()),
@@ -481,6 +542,14 @@ impl<'a> Query<'a> {
         });
 
         self
+    }
+
+    pub fn inner_join(self, table: &impl Table, sql: Sql) -> Self {
+        self.join(JoinType::Inner, false, table, sql)
+    }
+
+    pub fn left_outer_join(self, table: &impl Table, sql: Sql) -> Self {
+        self.join(JoinType::Left, true, table, sql)
     }
 
     pub fn group_by(mut self, columns: Vec<impl ToColumn>) -> Self {
@@ -547,7 +616,7 @@ impl<'a> Query<'a> {
             },
             _ => None,
         };
-        let inner_joins: Option<Arc<str>> = if let Some(inner_joins) = &self.inner_joins {
+        let inner_joins: Option<Arc<str>> = if let Some(inner_joins) = &self.joins {
             Some(inner_joins.clone().into())
         } else {
             None
@@ -802,51 +871,78 @@ pub fn or(left: Sql, right: Sql) -> Sql {
 }
 
 pub fn eq(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+    let value = right.into();
+    let op = match value {
+        Value::Null => "is",
+        _ => "=",
+    };
     Sql {
-        clause: format!("{} = ?", left.to_column()),
-        params: vec![right.into()],
+        clause: format!("{} {} {}", left.to_column(), op, value.to_column()),
+        params: params_from_value(value),
     }
 }
 
-pub fn on(left: impl ToColumn, right: impl ToColumn) -> Sql {
+impl ToColumn for Value {
+    fn to_column(&self) -> &'static str {
+        match self {
+            Value::Lit(x) => x,
+            Value::Null => "null",
+            _ => "?",
+        }
+    }
+}
+
+fn params_from_value(value: Value) -> Vec<Value> {
+    match value {
+        Value::Lit(_) | Value::Null => vec![],
+        _ => vec![value],
+    }
+}
+
+pub fn ne(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+    let value: Value = right.into();
+    let op = match value {
+        Value::Null => "is not",
+        _ => "!=",
+    };
     Sql {
-        clause: format!("on {} = {}", left.to_column(), right.to_column()),
-        params: vec![],
+        clause: format!("{} {} {}", left.to_column(), op, value.to_column()),
+        params: params_from_value(value),
     }
 }
 
 pub fn gt(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     Sql {
         clause: format!("{} > ?", left.to_column()),
-        params: vec![right.into()],
+        params: params_from_value(right.into()),
     }
 }
 
 pub fn lt(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     Sql {
         clause: format!("{} < ?", left.to_column()),
-        params: vec![right.into()],
+        params: params_from_value(right.into()),
     }
 }
 
 pub fn gte(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     Sql {
         clause: format!("{} >= ?", left.to_column()),
-        params: vec![right.into()],
+        params: params_from_value(right.into()),
     }
 }
 
 pub fn lte(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     Sql {
         clause: format!("{} <= ?", left.to_column()),
-        params: vec![right.into()],
+        params: params_from_value(right.into()),
     }
 }
 
 pub fn like(left: impl ToColumn, right: impl Into<Value>) -> Sql {
     Sql {
         clause: format!("{} like ?", left.to_column()),
-        params: vec![right.into()],
+        params: params_from_value(right.into()),
     }
 }
 
@@ -877,6 +973,30 @@ pub enum Value {
 impl From<String> for Value {
     fn from(value: String) -> Self {
         Value::Text(value.into())
+    }
+}
+
+impl From<Text> for Value {
+    fn from(value: Text) -> Self {
+        Value::Lit(value.0)
+    }
+}
+
+impl From<Integer> for Value {
+    fn from(value: Integer) -> Self {
+        Value::Lit(value.0)
+    }
+}
+
+impl From<Real> for Value {
+    fn from(value: Real) -> Self {
+        Value::Lit(value.0)
+    }
+}
+
+impl From<Blob> for Value {
+    fn from(value: Blob) -> Self {
+        Value::Lit(value.0)
     }
 }
 
@@ -930,13 +1050,11 @@ pub trait Table {
     where
         Self: Sized + Clone + Send + Sync;
     fn table_name(&self) -> &'static str;
+    fn table_alias(&self) -> Option<&'static str>;
     fn struct_name(&self) -> &'static str;
     fn column_names(&self) -> Vec<&'static str>;
     fn create_table_sql(&self) -> &'static str;
-    fn drop_table_sql(&self) -> &'static str;
     fn add_column_sql(&self, column_name: &str) -> String;
-    fn create_index_sql(&self, unique: bool, column_names: Vec<&str>) -> String;
-    fn drop_index_sql(&self, column_names: Vec<&str>) -> String;
 }
 
 pub trait Row
@@ -1281,7 +1399,7 @@ mod tests {
         let rows: Vec<CommentWithPost> = db
             .select(())
             .from(comments)
-            .inner_join(posts, on(posts.id, comments.post_id))
+            .inner_join(posts, eq(posts.id, comments.post_id))
             .all()
             .await?;
 
@@ -1379,33 +1497,68 @@ mod tests {
 
     #[allow(unused)]
     #[tokio::test]
-    async fn create_table_migration_works() -> Result<(), rizz_db::Error> {
+    async fn migrate_works() -> Result<(), rizz_db::Error> {
         use rizz_db::*;
 
-        #[database]
-        struct Database {
-            links: Links,
+        let sqlite_file = "test.sqlite3";
+
+        std::fs::remove_file(sqlite_file).unwrap_or_default();
+
+        let conn = Connection::default(sqlite_file);
+
+        {
+            #[database]
+            struct Database {
+                links: Links,
+            }
+
+            #[table("links")]
+            struct Links {
+                #[rizz(primary_key)]
+                id: Integer,
+
+                #[rizz(not_null)]
+                url: Text,
+            }
+
+            let db = Database::connect(conn.clone()).await?;
+
+            let changes = db.migrate().await?;
+
+            assert_eq!(changes, 1);
+
+            let changes = db.migrate().await?;
+
+            assert_eq!(changes, 0);
         }
 
-        #[table("links")]
-        struct Links {
-            #[rizz(primary_key)]
-            id: Integer,
+        {
+            #[database]
+            struct Database {
+                links: Links,
+            }
 
-            #[rizz(not_null)]
-            url: Text,
+            #[table("links")]
+            struct Links {
+                #[rizz(primary_key)]
+                id: Integer,
+
+                #[rizz(not_null)]
+                url: Text,
+
+                test: Text,
+            }
+
+            let db = Database::connect(conn).await?;
+
+            let changes = db.migrate().await?;
+
+            assert_eq!(changes, 1);
+
+            let changes = db.migrate().await?;
+
+            assert_eq!(changes, 0);
         }
-
-        let connection = Connection::default(":memory:");
-        let db = Database::connect(connection).await?;
-
-        let tables = db.migrate().await?;
-
-        assert_eq!(tables, 1);
-
-        let tables = db.migrate().await?;
-
-        assert_eq!(tables, 0);
 
         Ok(())
     }
