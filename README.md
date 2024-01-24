@@ -63,7 +63,7 @@ let db = Database::new("db.sqlite3").await?;
 let Database { posts, comments } = &db;
 
 // insert into posts (id, body) values (?, ?) returning *
-let inserted_post: Post = db
+let inserted: Post = db
     .insert(posts)
     .values(Post {
         id: 1,
@@ -73,18 +73,18 @@ let inserted_post: Post = db
     .await?;
 
 // update posts set body = ?, id = ? where id = ? returning *
-let updated_post: Post = db
+let updated: Post = db
     .update(posts)
     .set(Post {
         body: "post".into(),
-        ..inserted_post
+        ..inserted
     })?
     .r#where(eq(posts.id, 1))
     .returning()
     .await?;
 
 // delete from posts where id = ? returning *
-let deleted_post: Post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
+let deleted: Post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
 ```
 
 # Querying

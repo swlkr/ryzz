@@ -1318,45 +1318,57 @@ mod tests {
 
         let Database { posts, comments } = &db;
 
-        let new_post = Post {
-            id: 1,
-            body: "".into(),
-        };
-
-        let mut inserted_post: Post = db
+        // insert into posts (id, body) values (?, ?) returning *
+        let inserted: Post = db
             .insert(posts)
-            .values(new_post.clone())?
+            .values(Post {
+                id: 1,
+                body: "".into(),
+            })?
             .returning()
             .await?;
 
-        assert_eq!(inserted_post, new_post);
+        assert_eq!(inserted.id, 1);
+        assert_eq!(inserted.body, "");
 
-        let updated_post: Post = db
+        // update posts set body = ?, id = ? where id = ? returning *
+        let updated: Post = db
             .update(posts)
             .set(Post {
                 body: "post".into(),
-                ..inserted_post
+                ..inserted
             })?
             .r#where(eq(posts.id, 1))
             .returning()
             .await?;
 
-        inserted_post.body = "post".into();
-        assert_eq!(updated_post, inserted_post);
+        assert_eq!(updated.id, 1);
+        assert_eq!(updated.body, "post");
 
-        let deleted_post: Post = db
+        // delete from posts where id = ? returning *
+        let deleted: Post = db
             .delete_from(posts)
             .r#where(eq(posts.id, 1))
             .returning()
             .await?;
 
-        assert_eq!(deleted_post, inserted_post);
+        assert_eq!(deleted.id, 1);
+        assert_eq!(deleted.body, "post");
 
-        let inserted_post: Post = db
+        let rows: Vec<Post> = db.select(()).from(posts).all().await?;
+
+        assert_eq!(rows.len(), 0);
+
+        let inserted: Post = db
             .insert(posts)
-            .values(new_post.clone())?
+            .values(Post {
+                id: 1,
+                body: "".into(),
+            })?
             .returning()
             .await?;
+
+        assert_eq!(rows.len(), 0);
 
         let new_comment = Comment {
             id: 1,
@@ -1404,7 +1416,7 @@ mod tests {
             .await?;
 
         assert_eq!(rows[0].comment, new_comment);
-        assert_eq!(rows[0].post, new_post);
+        assert_eq!(rows[0].post, inserted);
 
         let query = db.select(()).from(comments);
 
