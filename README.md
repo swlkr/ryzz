@@ -40,20 +40,17 @@ struct Comments {
     post_id: Integer,
 }
 
-// TODO stick tables and columns in a OnceLock vec at compile time
-// TODO check those tables and columns from vec from the row proc_macro_attribute
-
-#[row(Posts)] // (Posts) is optional but it double checks that your types match up at compile time
+#[row(Posts)] // (Posts) is optional and checks that your row types match the table types
 struct Post {
-  id: u64,
+  id: i64,
   body: String
 }
 
 #[row(Comments)]
 struct Comment {
-    id: u64,
+    id: i64,
     body: String,
-    post_id: u64,
+    post_id: i64,
 }
 ```
 
@@ -134,19 +131,6 @@ db.create(&ix).await?;
 
 // drop index if exists posts_id_body_ix;
 db.drop(&ix).await?;
-```
-
-# Easier insert, update and delete
-
-```rust
-// insert into posts (id, body) values (?, ?) returning *
-let mut post: Post = db.insert(Post { id: 1, body: "".into() }).await?;
-
-// update posts set body = ? where id = ? returning *
-let post: Post = db.update_row(Post { body: "update".into(), ..post }).await?;
-
-// delete from posts where id = ? returning *
-let post: Post = db.delete(post).await?;
 ```
 
 # Supported types

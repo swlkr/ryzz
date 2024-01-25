@@ -1561,6 +1561,13 @@ mod tests {
                 test: Text,
             }
 
+            #[row]
+            struct Link {
+                id: i64,
+                url: String,
+                test: Option<String>,
+            }
+
             let db = Database::connect(conn).await?;
 
             let changes = db.migrate().await?;

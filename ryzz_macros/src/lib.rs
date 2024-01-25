@@ -1,15 +1,69 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
+use std::{
+    collections::HashSet,
+    sync::{Mutex, MutexGuard},
+};
 use syn::{
     parse::Parse, parse_macro_input, Attribute, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath,
     Field, Ident, ItemStruct, Lit, LitStr, PathSegment, Result,
 };
 
+static FIELDS: Mutex<Vec<(String, (String, String))>> = Mutex::new(vec![]);
+
+fn get_fields() -> MutexGuard<'static, Vec<(String, (String, String))>> {
+    FIELDS.lock().unwrap()
+}
+
 #[proc_macro_attribute]
-pub fn row(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let input1 = input.clone();
-    let mut item_struct = parse_macro_input!(input1 as ItemStruct);
+pub fn row(args: TokenStream, input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as ItemStruct);
+    let args = parse_macro_input!(args as RowArgs);
+    match row_macro(args, input) {
+        Ok(s) => s.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn row_macro(args: RowArgs, mut item_struct: ItemStruct) -> Result<TokenStream> {
+    // HACK checking for type matches between #[row] and #[table] structs
+    // Integer -> i64
+    // Text -> String
+    // Real -> f64
+    // Blob -> Vec<u8>
+    // Null -> Option<T>
+    let fields = get_fields();
+    let table_fields = if let Some(ref struct_name) = args.struct_name {
+        let struct_str = struct_name.to_string();
+        fields
+            .iter()
+            .filter(|field| field.0 == struct_str)
+            .map(|field| &field.1)
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+
+    // HACK check for missing field in row
+    let table_hash = table_fields
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<HashSet<_>>();
+    let row_hash = &item_struct
+        .fields
+        .iter()
+        .map(|field| field.ident.clone().expect("named field").to_string())
+        .collect::<HashSet<_>>();
+    let missing_row_fields = table_hash.difference(&row_hash);
+
+    for missing_field in missing_row_fields {
+        return Err(syn::Error::new(
+            item_struct.ident.span(),
+            format!("missing field {}", missing_field),
+        ));
+    }
+
     for field in &mut item_struct.fields {
         if field.attrs.iter().any(|attr| {
             let ident = if let Some(segment) = attr.path.segments.last() {
@@ -25,13 +79,43 @@ pub fn row(_args: TokenStream, input: TokenStream) -> TokenStream {
             let attr: Attribute = syn::parse_quote! { #[serde(default)] };
             field.attrs.push(attr);
         }
+
+        let table_field = table_fields
+            .iter()
+            .find(|f| f.0 == field.ident.as_ref().expect("named field").to_string());
+        if let Some((table_field_name, table_field_type)) = table_field {
+            let row_field_type = type_name(&field);
+            let r#type = match table_field_type.as_str() {
+                "Integer" => "i64",
+                "Text" => "String",
+                "Real" => "f64",
+                "Blob" => "Vec<u8>",
+                // TODO: Null
+                _ => unimplemented!(),
+            };
+            if row_field_type != r#type {
+                let compile_error = format!(
+                    "table {} with field {} and sql type {} expects type {}",
+                    &args.struct_name.unwrap(),
+                    table_field_name,
+                    table_field_type,
+                    r#type
+                );
+
+                return Err(syn::Error::new(
+                    field.ident.clone().expect("named field").span(),
+                    compile_error,
+                ));
+            }
+        } else {
+        }
     }
-    let output = quote! {
+
+    Ok(quote! {
         #[derive(Row, Default, serde::Serialize, serde::Deserialize, Debug)]
         #item_struct
-    };
-
-    output.into()
+    }
+    .into())
 }
 
 #[proc_macro_derive(Row, attributes(rizz))]
@@ -99,6 +183,18 @@ impl Parse for Args {
         let name = input.parse::<LitStr>().ok();
 
         Ok(Self { name })
+    }
+}
+
+struct RowArgs {
+    struct_name: Option<Ident>,
+}
+
+impl Parse for RowArgs {
+    fn parse(input: syn::parse::ParseStream) -> Result<Self> {
+        let struct_name = input.parse::<Ident>().ok();
+
+        Ok(Self { struct_name })
     }
 }
 
@@ -343,6 +439,7 @@ pub fn table_derive(s: TokenStream) -> TokenStream {
 }
 
 fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let mut fields = get_fields();
     let struct_name = input.ident;
     let table_str = input
         .attrs
@@ -374,6 +471,14 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             .fields
             .iter()
             .map(|field| {
+                fields.push((
+                    struct_name.to_string(),
+                    (
+                        field.ident.as_ref().expect("named field").to_string(),
+                        type_name(&field),
+                    ),
+                ));
+
                 (
                     field
                         .ident
@@ -604,6 +709,18 @@ impl Parse for RizzAttr {
         }
 
         Ok(rizz_attr)
+    }
+}
+
+fn type_name(field: &Field) -> String {
+    match &field.ty {
+        syn::Type::Path(syn::TypePath { path, .. }) => path
+            .segments
+            .last()
+            .expect("Should have segments")
+            .ident
+            .to_string(),
+        _ => unimplemented!(),
     }
 }
 
