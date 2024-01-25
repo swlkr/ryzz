@@ -96,7 +96,11 @@ let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
 // select ... from comments
 let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await?;
+```
 
+# Joins
+
+```rust
 #[row]
 struct CommentWithPost {
     comment: Comment,
