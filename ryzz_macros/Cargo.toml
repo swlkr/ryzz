@@ -1,5 +1,5 @@
 [package]
-name = "rizz_db_macros"
+name = "ryzz_macros"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -7,7 +7,7 @@ readme = "README.md"
 homepage = "https://github.com/swlkr/rizz"
 repository = "https://github.com/swlkr/rizz"
 keywords = ["rizz_db_macros"]
-description = "Macros for the rizz_db crate"
+description = "Macros for the ryzz crate"
 
 [lib]
 proc-macro = true

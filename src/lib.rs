@@ -1,8 +1,8 @@
 //! Rizz is a query builder and migration generator for sqlite, don't call it an orm.
 //!
-extern crate self as rizz_db;
-pub use rizz_db_macros::{database, row, table, Row, Table};
+extern crate self as ryzz;
 use rusqlite::OpenFlags;
+pub use ryzz_macros::{database, row, table, Row, Table};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{fmt::Display, sync::Arc};
 pub use tokio_rusqlite;
@@ -1269,8 +1269,8 @@ pub fn index<'a>(name: &'a str) -> Index<'a> {
 mod tests {
     #[tokio::test]
     #[allow(unused)]
-    async fn readme_works() -> Result<(), rizz_db::Error> {
-        use rizz_db::*;
+    async fn readme_works() -> Result<(), ryzz::Error> {
+        use ryzz::*;
 
         #[database]
         struct Database {
@@ -1435,8 +1435,8 @@ mod tests {
 
     #[allow(unused)]
     #[tokio::test]
-    async fn indexes_works() -> Result<(), rizz_db::Error> {
-        use rizz_db::*;
+    async fn indexes_works() -> Result<(), ryzz::Error> {
+        use ryzz::*;
 
         #[database]
         struct Database {
@@ -1509,8 +1509,8 @@ mod tests {
 
     #[allow(unused)]
     #[tokio::test]
-    async fn migrate_works() -> Result<(), rizz_db::Error> {
-        use rizz_db::*;
+    async fn migrate_works() -> Result<(), ryzz::Error> {
+        use ryzz::*;
 
         let sqlite_file = "test.sqlite3";
 

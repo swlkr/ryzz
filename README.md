@@ -1,17 +1,17 @@
-# rizz_db
+# ryzz
 
-rizz_db is an automatic migration generator and query builder for sqlite in rust. Don't call it an orm.
+ryzz is an automatic migration generator and query builder for sqlite in rust. Don't call it an orm.
 
 # Install
 
 ```sh
-cargo add rizz_db
+cargo add ryzz
 ```
 
 # Declare your schema
 
 ```rust
-use rizz_db::*;
+use ryzz::*;
 
 #[database]
 struct Database {
@@ -40,13 +40,16 @@ struct Comments {
     post_id: Integer,
 }
 
-#[row]
+// TODO stick tables and columns in a OnceLock vec at compile time
+// TODO check those tables and columns from vec from the row proc_macro_attribute
+
+#[row(Posts)] // (Posts) is optional but it double checks that your types match up at compile time
 struct Post {
   id: u64,
   body: String
 }
 
-#[row]
+#[row(Comments)]
 struct Comment {
     id: u64,
     body: String,
@@ -131,6 +134,19 @@ db.create(&ix).await?;
 
 // drop index if exists posts_id_body_ix;
 db.drop(&ix).await?;
+```
+
+# Easier insert, update and delete
+
+```rust
+// insert into posts (id, body) values (?, ?) returning *
+let mut post: Post = db.insert(Post { id: 1, body: "".into() }).await?;
+
+// update posts set body = ? where id = ? returning *
+let post: Post = db.update_row(Post { body: "update".into(), ..post }).await?;
+
+// delete from posts where id = ? returning *
+let post: Post = db.delete(post).await?;
 ```
 
 # Supported types
