@@ -341,13 +341,20 @@ pub fn table_derive(s: TokenStream) -> TokenStream {
 }
 
 fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let struct_name = input.ident;
     let table_str = input
         .attrs
         .iter()
         .filter_map(|attr| attr.parse_args::<RizzAttr>().ok())
         .filter_map(|ra| ra.table_name)
-        .last()
-        .expect("define #![rizz(table = \"your table name here\")] on struct");
+        .last();
+    let table_name = format!(
+        "{}",
+        match table_str {
+            Some(s) => s.value(),
+            None => struct_name.to_string(),
+        }
+    );
     let table_alias = input
         .attrs
         .iter()
@@ -355,13 +362,11 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         .filter_map(|ra| ra.r#as)
         .last();
 
-    let (table_str, table_alias) = match table_alias {
-        Some(x) => (x, quote! { Some(#table_str) }),
-        None => (table_str, quote! { None }),
+    let (table_name, table_alias) = match table_alias {
+        Some(x) => (x.value(), quote! { Some(#table_name) }),
+        None => (table_name, quote! { None }),
     };
 
-    let struct_name = input.ident;
-    let table_name = format!("{}", table_str.value());
     let attrs = match input.data {
         syn::Data::Struct(ref data) => data
             .fields

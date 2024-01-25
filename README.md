@@ -19,7 +19,7 @@ struct Database {
     comments: Comments
 }
 
-#[table("posts")]
+#[table]
 struct Posts {
   #[rizz(primary_key)]
   id: Integer,
@@ -28,7 +28,7 @@ struct Posts {
   body: Text
 }
 
-#[table("comments")]
+#[table]
 struct Comments {
     #[rizz(primary_key)]
     id: Integer,
@@ -36,7 +36,7 @@ struct Comments {
     #[rizz(not_null)]
     body: Text,
 
-    #[rizz(references = "posts(id)")]
+    #[rizz(references = "Posts(id)")]
     post_id: Integer,
 }
 
