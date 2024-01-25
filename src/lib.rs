@@ -1265,6 +1265,26 @@ pub fn index<'a>(name: &'a str) -> Index<'a> {
     Index::new(name)
 }
 
+#[allow(dead_code)]
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Pk<T: ToColumn>(T);
+
+impl<T: ToColumn> ToColumn for Pk<T> {
+    fn to_column(&self) -> &'static str {
+        self.0.to_column()
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Null<T: ToColumn>(T);
+
+impl<T: ToColumn> ToColumn for Null<T> {
+    fn to_column(&self) -> &'static str {
+        self.0.to_column()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -1280,21 +1300,15 @@ mod tests {
 
         #[table]
         struct Posts {
-            #[rizz(primary_key)]
-            id: Integer,
-
-            #[rizz(not_null)]
+            id: Pk<Integer>,
+            title: Null<Text>,
             body: Text,
         }
 
         #[table]
         struct Comments {
-            #[rizz(primary_key)]
-            id: Integer,
-
-            #[rizz(not_null)]
+            id: Pk<Integer>,
             body: Text,
-
             #[rizz(references = "Posts(id)")]
             post_id: Integer,
         }
@@ -1303,6 +1317,7 @@ mod tests {
         #[derive(PartialEq, Clone)]
         struct Post {
             id: u64,
+            title: Option<String>,
             body: String,
         }
 
@@ -1323,6 +1338,7 @@ mod tests {
             .insert_into(posts)
             .values(Post {
                 id: 1,
+                title: None,
                 body: "".into(),
             })?
             .returning()
@@ -1330,6 +1346,7 @@ mod tests {
 
         assert_eq!(inserted.id, 1);
         assert_eq!(inserted.body, "");
+        assert_eq!(inserted.title, None);
 
         // update posts set body = ?, id = ? where id = ? returning *
         let updated: Post = db
@@ -1362,6 +1379,7 @@ mod tests {
         let inserted: Post = db
             .insert_into(posts)
             .values(Post {
+                title: None,
                 id: 1,
                 body: "".into(),
             })?
@@ -1544,40 +1562,34 @@ mod tests {
             assert_eq!(changes, 0);
         }
 
-        {
-            #[database]
-            struct Database {
-                links: Links,
-            }
-
-            #[table]
-            struct Links {
-                #[rizz(primary_key)]
-                id: Integer,
-
-                #[rizz(not_null)]
-                url: Text,
-
-                test: Text,
-            }
-
-            #[row]
-            struct Link {
-                id: i64,
-                url: String,
-                test: Option<String>,
-            }
-
-            let db = Database::connect(conn).await?;
-
-            let changes = db.migrate().await?;
-
-            assert_eq!(changes, 1);
-
-            let changes = db.migrate().await?;
-
-            assert_eq!(changes, 0);
+        #[database]
+        struct Database {
+            links: Links,
         }
+
+        #[table]
+        struct Links {
+            id: Pk<Integer>,
+            url: Text,
+            test: Null<Text>,
+        }
+
+        #[row]
+        struct Link {
+            id: i64,
+            url: String,
+            test: Option<String>,
+        }
+
+        let db = Database::connect(conn).await?;
+
+        let changes = db.migrate().await?;
+
+        assert_eq!(changes, 1);
+
+        let changes = db.migrate().await?;
+
+        assert_eq!(changes, 0);
 
         Ok(())
     }

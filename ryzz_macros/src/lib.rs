@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, ToTokens};
 use std::{
     collections::HashSet,
@@ -7,7 +7,7 @@ use std::{
 };
 use syn::{
     parse::Parse, parse_macro_input, Attribute, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath,
-    Field, Ident, ItemStruct, Lit, LitStr, PathSegment, Result,
+    Field, Ident, ItemStruct, Lit, LitStr, PathSegment, Result, Type,
 };
 
 static FIELDS: Mutex<Vec<(String, (String, String))>> = Mutex::new(vec![]);
@@ -84,7 +84,7 @@ fn row_macro(args: RowArgs, mut item_struct: ItemStruct) -> Result<TokenStream> 
             .iter()
             .find(|f| f.0 == field.ident.as_ref().expect("named field").to_string());
         if let Some((table_field_name, table_field_type)) = table_field {
-            let row_field_type = type_name(&field);
+            let row_field_type = type_name(&field.ty)?;
             let r#type = match table_field_type.as_str() {
                 "Integer" => "i64",
                 "Text" => "String",
@@ -475,7 +475,7 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
                     struct_name.to_string(),
                     (
                         field.ident.as_ref().expect("named field").to_string(),
-                        type_name(&field),
+                        type_name(&field.ty).expect("field with type Pk<T> or T"),
                     ),
                 ));
 
@@ -519,17 +519,20 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             } else {
                 None
             };
-            let data_type = ty.to_token_stream().to_string().to_lowercase();
-            let mut parts = vec![Some(ident.to_string()), Some(data_type)];
-            if let Some(rizz_attr) = rizz_attr {
-                let not_null = match rizz_attr.not_null {
-                    true => Some("not null".into()),
-                    false => None,
-                };
-                let primary_key = match rizz_attr.primary_key {
+            let column_type = column_type(ty).expect("expected Pk<T>, Null<T> or T");
+            let mut parts = vec![
+                Some(ident.to_string()),
+                Some(column_type.ident().to_string()),
+                match column_type.is_pk() {
                     true => Some("primary key".into()),
                     false => None,
-                };
+                },
+                match column_type.is_not_null() {
+                    true => Some("not null".into()),
+                    false => None,
+                },
+            ];
+            if let Some(rizz_attr) = rizz_attr {
                 let unique = match rizz_attr.unique {
                     true => Some("unique".into()),
                     false => None,
@@ -542,13 +545,7 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
                     Some(rf) => Some(format!("references {}", rf.value())),
                     None => None,
                 };
-                parts.extend(vec![
-                    primary_key,
-                    unique,
-                    not_null,
-                    default_value,
-                    references,
-                ]);
+                parts.extend(vec![unique, default_value, references]);
             }
             Some(
                 parts
@@ -578,15 +575,21 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             };
 
             let value = format!("{}.{}", table_name, name);
-            match ty.into_token_stream().to_string().as_str() {
-                "Integer" => quote! { #ident: Integer(#value) },
-                "Blob" => quote! { #ident: Blob(#value) },
-                "Real" => quote! { #ident: Real(#value) },
-                "Text" => quote! { #ident: Text(#value) },
-                _ => unimplemented!(),
-            }
+            let column_type = column_type(ty)?;
+
+            Ok(match column_type {
+                ColumnType::Pk(type_ident) => quote! {
+                    #ident: ryzz::Pk(ryzz::#type_ident(#value))
+                },
+                ColumnType::NotNull(type_ident) => quote! {
+                    #ident: ryzz::#type_ident(#value)
+                },
+                ColumnType::Null(type_ident) => quote! {
+                    #ident: ryzz::Null(#type_ident(#value))
+                },
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let create_table_sql = format!(
         "create table if not exists {} ({});",
         table_name, column_def_sql
@@ -712,15 +715,82 @@ impl Parse for RizzAttr {
     }
 }
 
-fn type_name(field: &Field) -> String {
-    match &field.ty {
+fn type_name(ty: &Type) -> Result<String> {
+    Ok(type_path_ident(ty)?.to_string())
+}
+
+fn type_path_ident(ty: &Type) -> Result<Ident> {
+    Ok(match &ty {
         syn::Type::Path(syn::TypePath { path, .. }) => path
             .segments
             .last()
-            .expect("Should have segments")
+            .ok_or(syn::Error::new(
+                Span::call_site(),
+                "expected struct with named fields",
+            ))?
             .ident
-            .to_string(),
+            .clone(),
         _ => unimplemented!(),
+    })
+}
+
+fn column_type(ty: &Type) -> Result<ColumnType> {
+    match &ty {
+        syn::Type::Path(type_path) => {
+            let syn::TypePath { path, .. } = type_path;
+            let segment = path.segments.last().ok_or(syn::Error::new(
+                Span::call_site(),
+                "expected struct with named fields",
+            ))?;
+            let ident = &segment.ident;
+
+            match &segment.arguments {
+                syn::PathArguments::AngleBracketed(angle) => {
+                    match angle.args.last().expect("Should be Pk<T> or T") {
+                        syn::GenericArgument::Type(ty) => match ident.to_string().as_str() {
+                            "Pk" => Ok(ColumnType::Pk(type_path_ident(&ty)?)),
+                            "Null" => Ok(ColumnType::Null(type_path_ident(&ty)?)),
+                            _ => unimplemented!(),
+                        },
+                        _ => unimplemented!(),
+                    }
+                }
+                syn::PathArguments::None => Ok(ColumnType::NotNull(ident.clone())),
+                _ => unimplemented!(),
+            }
+        }
+        _ => unimplemented!(),
+    }
+}
+
+enum ColumnType {
+    Pk(Ident),
+    NotNull(Ident),
+    Null(Ident),
+}
+
+impl ColumnType {
+    fn is_pk(&self) -> bool {
+        match self {
+            ColumnType::Pk(_) => true,
+            _ => false,
+        }
+    }
+
+    fn is_not_null(&self) -> bool {
+        match self {
+            ColumnType::NotNull(_) => true,
+            _ => false,
+        }
+    }
+
+    fn ident(&self) -> Ident {
+        match self {
+            ColumnType::Pk(ident) => ident,
+            ColumnType::NotNull(ident) => ident,
+            ColumnType::Null(ident) => ident,
+        }
+        .clone()
     }
 }
 
