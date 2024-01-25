@@ -1,6 +1,11 @@
 # ryzz
 
-ryzz is an automatic migration generator and query builder for sqlite in rust. Don't call it an orm.
+ryzz is an automatic migration generator and query builder for sqlite in rust.
+
+- Schema is auto migrated by `#[table]` structs
+- Tries to stick to sql-like syntax
+- Rust query builder
+- Don't call it an orm.
 
 # Install
 
@@ -21,28 +26,24 @@ struct Database {
 
 #[table]
 struct Posts {
-  #[rizz(primary_key)]
-  id: Integer,
-
-  #[rizz(not_null)]
+  id: Pk<Integer>,
+  title: Null<Text>,
   body: Text
 }
 
 #[table]
 struct Comments {
-    #[rizz(primary_key)]
-    id: Integer,
-
-    #[rizz(not_null)]
+    id: Pk<Integer>,
     body: Text,
-
     #[rizz(references = "Posts(id)")]
     post_id: Integer,
 }
 
-#[row(Posts)] // (Posts) is optional and checks that your row types match the table types
+ // (Posts) is optional; checks that your row types match the table types
+#[row(Posts)]
 struct Post {
   id: i64,
+  title: Option<String>,
   body: String
 }
 
@@ -67,6 +68,7 @@ let inserted: Post = db
     .insert_into(posts)
     .values(Post {
         id: 1,
+        title: None,
         body: "".into(),
     })?
     .returning()
@@ -121,7 +123,7 @@ let prepared = query.prepare::<Comment>();
 let rows: Vec<Comment> = prepared.all().await?;
 ```
 
-# Manage Indexes/Indices (same thing)
+# Manage Indices
 
 ```rust
 let ix = index("posts_id_body_ix").unique().on(posts, (posts.id, posts.body));
@@ -141,4 +143,11 @@ db.drop(&ix).await?;
 | Integer | i64 |
 | Real | f64 |
 | Null | None |
-| Blob | Vec<u8> |
+| Blob | Vec&lt;u8&gt; |
+
+# Auto schema migrations
+
+On compile, the `#[table]` macro runs `create table if not exists` or `alter table add column` for any new structs or struct fields ryzz hasn't seen before.
+
+- Schema migrations are one-way, append-only. Inspired by [trevyn/turbosql](https://github.com/trevyn/turbosql)
+- When `Database::new()` is called, the append migrations are run
