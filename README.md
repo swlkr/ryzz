@@ -132,3 +132,13 @@ db.create(&ix).await?;
 // drop index if exists posts_id_body_ix;
 db.drop(&ix).await?;
 ```
+
+# Supported types
+
+| Sqlite | Rust |
+| ------------- | ------------- |
+| Text | String |
+| Integer | i64 |
+| Real | f64 |
+| Null | None |
+| Blob | Vec<u8> |
