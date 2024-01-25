@@ -17,9 +17,11 @@ pub fn row(_args: TokenStream, input: TokenStream) -> TokenStream {
             } else {
                 "".into()
             };
+            // HACK check for serde(default) on fields so there aren't duplicates
             ident == "serde" && attr.tokens.to_string() == "(default)"
         }) {
         } else {
+            // HACK put serde(default) on all fields
             let attr: Attribute = syn::parse_quote! { #[serde(default)] };
             field.attrs.push(attr);
         }
@@ -89,12 +91,12 @@ fn row_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
 }
 
 struct Args {
-    name: LitStr,
+    name: Option<LitStr>,
 }
 
 impl Parse for Args {
     fn parse(input: syn::parse::ParseStream) -> Result<Self> {
-        let name = input.parse::<LitStr>()?;
+        let name = input.parse::<LitStr>().ok();
 
         Ok(Self { name })
     }
