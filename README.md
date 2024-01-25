@@ -34,7 +34,7 @@ struct Posts {
 struct Comments {
     id: Pk<Integer>,
     body: Text,
-    #[rizz(references = "Posts(id)")]
+    #[ryzz(references = "Posts(id)")]
     post_id: Integer,
 }
 

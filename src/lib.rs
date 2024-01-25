@@ -1,4 +1,4 @@
-//! Rizz is a query builder and migration generator for sqlite, don't call it an orm.
+//! Ryzz is a query builder and migration generator for sqlite, don't call it an orm.
 //!
 extern crate self as ryzz;
 use rusqlite::OpenFlags;
@@ -124,12 +124,12 @@ impl Connection {
 #[table("sqlite_schema")]
 pub struct SqliteSchema {
     pub name: Text,
-    #[rizz(name = "type")]
+    #[ryzz(name = "type")]
     pub r#type: Text,
 }
 
 #[table("pragma_table_info(sqlite_schema.name)")]
-#[rizz(r#as = "pti")]
+#[ryzz(r#as = "pti")]
 pub struct TableInfo {
     pub name: Text,
 }
@@ -220,9 +220,9 @@ fn unqualify(s: &str) -> String {
     s.split(".").nth(1).unwrap_or(s).to_string()
 }
 
-#[table("rizz_migrations")]
+#[table("ryzz_migrations")]
 struct Migrations {
-    #[rizz(not_null, unique)]
+    #[ryzz(not_null, unique)]
     sql: Text,
 }
 
@@ -1309,7 +1309,7 @@ mod tests {
         struct Comments {
             id: Pk<Integer>,
             body: Text,
-            #[rizz(references = "Posts(id)")]
+            #[ryzz(references = "Posts(id)")]
             post_id: Integer,
         }
 
@@ -1463,10 +1463,10 @@ mod tests {
 
         #[table]
         struct Links {
-            #[rizz(primary_key)]
+            #[ryzz(primary_key)]
             id: Integer,
 
-            #[rizz(not_null)]
+            #[ryzz(not_null)]
             url: Text,
         }
 
@@ -1544,10 +1544,10 @@ mod tests {
 
             #[table]
             struct Links {
-                #[rizz(primary_key)]
+                #[ryzz(primary_key)]
                 id: Integer,
 
-                #[rizz(not_null)]
+                #[ryzz(not_null)]
                 url: Text,
             }
 
