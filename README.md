@@ -64,7 +64,7 @@ let Database { posts, comments } = &db;
 
 // insert into posts (id, body) values (?, ?) returning *
 let inserted: Post = db
-    .insert(posts)
+    .insert_into(posts)
     .values(Post {
         id: 1,
         body: "".into(),

@@ -683,7 +683,7 @@ impl<'a> Query<'a> {
         Ok(self)
     }
 
-    pub fn insert(mut self, table: &impl Table) -> Self {
+    pub fn insert_into(mut self, table: &impl Table) -> Self {
         self.insert_into = Some(format!("insert into {}", table.table_name()).into());
         self.tables.push(Tbl {
             table_name: Some(table.table_name()),
@@ -1320,7 +1320,7 @@ mod tests {
 
         // insert into posts (id, body) values (?, ?) returning *
         let inserted: Post = db
-            .insert(posts)
+            .insert_into(posts)
             .values(Post {
                 id: 1,
                 body: "".into(),
@@ -1360,7 +1360,7 @@ mod tests {
         assert_eq!(rows.len(), 0);
 
         let inserted: Post = db
-            .insert(posts)
+            .insert_into(posts)
             .values(Post {
                 id: 1,
                 body: "".into(),
@@ -1377,7 +1377,7 @@ mod tests {
         };
 
         let comment: Comment = db
-            .insert(comments)
+            .insert_into(comments)
             .values(new_comment.clone())?
             .returning()
             .await?;
@@ -1466,7 +1466,7 @@ mod tests {
         db.create(&links_url_ix).await?;
 
         let rows = db
-            .insert(links)
+            .insert_into(links)
             .values(Link {
                 id: 1,
                 url: "".into(),
@@ -1477,7 +1477,7 @@ mod tests {
         assert_eq!(rows, 1);
 
         let result = db
-            .insert(links)
+            .insert_into(links)
             .values(Link {
                 id: 2,
                 url: "".into(),
@@ -1490,7 +1490,7 @@ mod tests {
         db.drop(&links_url_ix).await?;
 
         let result = db
-            .insert(links)
+            .insert_into(links)
             .values(Link {
                 id: 2,
                 url: "".into(),

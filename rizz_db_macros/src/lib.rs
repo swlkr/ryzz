@@ -280,8 +280,8 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
                 Query::new(&self.connection()).select(columns)
             }
 
-            pub fn insert(&self, table: &impl Table) -> Query {
-                Query::new(&self.connection()).insert(table)
+            pub fn insert_into(&self, table: &impl Table) -> Query {
+                Query::new(&self.connection()).insert_into(table)
             }
 
             pub fn delete_from<'a>(&'a self, table: &'a dyn Table) -> Query<'a> {
