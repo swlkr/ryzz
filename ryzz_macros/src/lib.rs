@@ -221,7 +221,7 @@ fn table_macro(args: Args, mut row_struct: ItemStruct) -> Result<TokenStream2> {
                     .select(())
                     .from(sqlite_schema)
                     .left_outer_join(pti, ryzz::ne(pti.name, sqlite_schema.name))
-                    .r#where(ryzz::and(ryzz::eq(sqlite_schema.r#type, "table"), ryzz::eq(sqlite_schema.name, table.table_name())))
+                    .r#where(ryzz::and(ryzz::eq(sqlite_schema.r#type, "table".to_owned()), ryzz::eq(sqlite_schema.name, table.table_name().to_owned())))
                     .all::<ryzz::TableInfoRow>()
                     .await?
                     .into_iter()

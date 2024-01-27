@@ -1,9 +1,12 @@
 //! Ryzz is a query builder and migration generator for sqlite, don't call it an orm.
 //!
 extern crate self as ryzz;
-use rusqlite::OpenFlags;
+pub use rusqlite::types::Value;
+pub use rusqlite::ToSql;
+use rusqlite::{params_from_iter, OpenFlags};
 pub use ryzz_macros::{row, table, Row, Table};
 use serde::{de::DeserializeOwned, Serialize};
+use serde_rusqlite::NamedParamSlice;
 use std::{fmt::Display, sync::Arc};
 pub use tokio_rusqlite;
 
@@ -227,11 +230,6 @@ struct Migration {
     sql: String,
 }
 
-// #[row]
-// struct Migration {
-//     sql: String,
-// }
-
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalMode {
     Delete,
@@ -252,69 +250,11 @@ pub enum Synchronous {
     Extra,
 }
 
-impl Value {
-    fn to_sql(&self) -> &dyn rusqlite::ToSql {
-        match self {
-            Value::Text(s) => s,
-            Value::Blob(b) => b,
-            Value::Real(r) => r,
-            Value::Integer(i) => i,
-            Value::Lit(s) => s,
-            Value::Null => &rusqlite::types::Null,
-        }
-    }
-}
-
-impl rusqlite::ToSql for Value {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        use rusqlite::types::{ToSqlOutput, ValueRef};
-        match self {
-            Value::Text(s) => Ok(s.as_bytes().into()),
-            Value::Blob(b) => Ok(ToSqlOutput::Borrowed(b.as_slice().into())),
-            Value::Real(r) => Ok(ToSqlOutput::Borrowed(ValueRef::Real(*r))),
-            Value::Integer(i) => Ok(ToSqlOutput::Borrowed(ValueRef::Integer(*i))),
-            Value::Lit(s) => Ok(ToSqlOutput::Borrowed(s.as_bytes().into())),
-            Value::Null => Ok(ToSqlOutput::Borrowed(ValueRef::Null).into()),
-        }
-    }
-}
-
-impl From<rusqlite::types::ToSqlOutput<'_>> for Value {
-    fn from(value: rusqlite::types::ToSqlOutput) -> Self {
-        match value {
-            rusqlite::types::ToSqlOutput::Borrowed(b) => match b {
-                rusqlite::types::ValueRef::Null => Value::Null,
-                rusqlite::types::ValueRef::Integer(i) => Value::Integer(i),
-                rusqlite::types::ValueRef::Real(r) => Value::Real(r),
-                rusqlite::types::ValueRef::Text(t) => Value::Text(
-                    std::str::from_utf8(t)
-                        .expect("Expected a utf8 encoded string")
-                        .into(),
-                ),
-                rusqlite::types::ValueRef::Blob(b) => Value::Blob(b.into()),
-            },
-            rusqlite::types::ToSqlOutput::Owned(o) => match o {
-                rusqlite::types::Value::Null => Value::Null,
-                rusqlite::types::Value::Integer(i) => Value::Integer(i),
-                rusqlite::types::Value::Real(val) => Value::Real(val),
-                rusqlite::types::Value::Text(val) => Value::Text(val.into()),
-                rusqlite::types::Value::Blob(val) => Value::Blob(val),
-            },
-            _ => unimplemented!(),
-        }
-    }
-}
-
 async fn execute(connection: &tokio_rusqlite::Connection, sql: Sql) -> Result<usize, Error> {
+    let params = params_from_iter(sql.params.into_iter());
+    let clause = sql.clause;
     let results = connection
-        .call(move |conn| {
-            let params = sql
-                .params
-                .iter()
-                .map(|value| value.to_sql())
-                .collect::<Vec<_>>();
-            conn.prepare(&sql.clause)?.execute(&*params)
-        })
+        .call(move |conn| conn.prepare(&clause)?.execute(params))
         .await?;
 
     Ok(results)
@@ -324,15 +264,12 @@ pub async fn rows<T: DeserializeOwned + Send + 'static>(
     connection: &tokio_rusqlite::Connection,
     sql: Sql,
 ) -> Result<Vec<T>, Error> {
+    let params = params_from_iter(sql.params.into_iter());
+    let clause = sql.clause;
     let results = connection
         .call(move |conn| {
-            let Sql { clause, params } = sql;
-            let params = params
-                .iter()
-                .map(|value| value.to_sql())
-                .collect::<Vec<_>>();
             let mut stmt = conn.prepare(&clause)?;
-            let rows = stmt.query(&*params)?;
+            let rows = stmt.query(params)?;
             // HACK there is only ever one column, it should always be valid json
             rows.mapped(|row| {
                 let json: String = row.get(0)?;
@@ -584,9 +521,6 @@ impl<'a> Query<'a> {
                                 .join(",");
                             Some(format!("select {}", tables).into())
                         } else {
-                            // TODO match up table names from self.tables
-                            // TODO with field names from T struct
-                            // TODO they should be in the same order?
                             let keys = T::column_names();
                             let x = keys
                                 .iter()
@@ -686,17 +620,8 @@ impl<'a> Query<'a> {
         self
     }
 
-    fn row_to_named_params(row: impl Serialize) -> Result<Vec<(Arc<str>, Value)>, Error> {
-        let named_params = serde_rusqlite::to_params_named(row)?;
-        named_params
-            .iter()
-            .map(|(name, value)| -> Result<(Arc<str>, Value), Error> {
-                Ok((
-                    name.replacen(":", "", 1).as_str().into(),
-                    value.to_sql()?.into(),
-                ))
-            })
-            .collect()
+    fn row_to_named_params(row: impl Serialize) -> Result<NamedParamSlice, Error> {
+        Ok(serde_rusqlite::to_params_named(row)?)
     }
 
     pub fn values(mut self, row: impl Serialize) -> Result<Self, Error> {
@@ -704,17 +629,23 @@ impl<'a> Query<'a> {
 
         let column_names = named_params
             .iter()
-            .map(|(name, _)| name.to_string())
+            .map(|(name, _)| name.replacen(":", "", 1).to_string())
             .collect::<Vec<_>>();
         let placeholders = named_params
             .iter()
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(",");
-        let values = named_params
-            .into_iter()
-            .map(|(_, value)| Value::from(value))
-            .collect::<Vec<_>>();
+        let values: Result<Vec<_>, Error> = named_params
+            .iter()
+            .map(|(_, to_sql)| {
+                Ok(match to_sql.to_sql()? {
+                    rusqlite::types::ToSqlOutput::Borrowed(value_ref) => value_ref.into(),
+                    rusqlite::types::ToSqlOutput::Owned(value) => value,
+                    _ => unimplemented!(),
+                })
+            })
+            .collect();
 
         self.insert_into = match &self.insert_into {
             Some(sql) => Some(format!("{} ({})", sql, column_names.join(",")).into()),
@@ -725,7 +656,7 @@ impl<'a> Query<'a> {
             }
         };
 
-        self.values = values;
+        self.values = values?;
         self.values_sql = Some(format!("values ({})", placeholders).into());
 
         Ok(self)
@@ -742,16 +673,28 @@ impl<'a> Query<'a> {
 
     pub fn set(mut self, row: impl Serialize) -> Result<Self, Error> {
         let named_params = Self::row_to_named_params(row)?;
-        let set = named_params
+
+        let column_names = named_params
             .iter()
-            .map(|(name, _)| format!("{} = ?", name))
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>();
+        let set = column_names
+            .iter()
+            .map(|name| format!("{} = ?", name.replacen(":", "", 1)))
             .collect::<Vec<_>>()
             .join(",");
         self.set = Some(format!("set {}", set).into());
-        self.values = named_params
-            .into_iter()
-            .map(|(_, value)| value)
-            .collect::<Vec<_>>();
+        let values: Result<Vec<_>, Error> = named_params
+            .iter()
+            .map(|(_, to_sql)| {
+                Ok(match to_sql.to_sql()? {
+                    rusqlite::types::ToSqlOutput::Borrowed(value_ref) => value_ref.into(),
+                    rusqlite::types::ToSqlOutput::Owned(value) => value,
+                    _ => unimplemented!(),
+                })
+            })
+            .collect();
+        self.values = values?;
 
         Ok(self)
     }
@@ -791,11 +734,6 @@ impl<'a> Query<'a> {
         let rows_affected = execute(&self.connection, self.sql_statement::<usize>()).await?;
         Ok(rows_affected)
     }
-
-    // pub fn count(mut self) -> Query<'a> {
-    //     self.select = Some(format!("select count(*) as count").into());
-    //     self
-    // }
 }
 
 impl Row for usize {
@@ -879,83 +817,207 @@ pub fn or(left: Sql, right: Sql) -> Sql {
     }
 }
 
-pub fn eq(left: impl ToColumn, right: impl Into<Value>) -> Sql {
-    let value = right.into();
-    let op = match value {
-        Value::Null => "is",
-        _ => "=",
-    };
-    Sql {
-        clause: format!("{} {} {}", left.to_column(), op, value.to_column()),
-        params: params_from_value(value),
-    }
-}
+pub trait ToValueColumn {
+    fn to_value(&self) -> Option<Value>;
+    fn to_column(&self) -> Option<&'static str>;
 
-impl ToColumn for Value {
-    fn to_column(&self) -> &'static str {
-        match self {
-            Value::Lit(x) => x,
-            Value::Null => "null",
-            _ => "?",
+    fn to_params(&self) -> Vec<Value> {
+        match self.to_value() {
+            Some(value) => vec![value],
+            None => vec![],
+        }
+    }
+
+    fn to_placeholder(&self) -> &'static str {
+        match self.to_value() {
+            Some(value) => match value {
+                Value::Null => "null",
+                _ => "?",
+            },
+            None => self.to_column().unwrap_or(""),
         }
     }
 }
 
-fn params_from_value(value: Value) -> Vec<Value> {
-    match value {
-        Value::Lit(_) | Value::Null => vec![],
-        _ => vec![value],
+impl ToValueColumn for Value {
+    fn to_value(&self) -> Option<Value> {
+        Some(self.clone())
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some("?")
     }
 }
 
-pub fn ne(left: impl ToColumn, right: impl Into<Value>) -> Sql {
-    let value: Value = right.into();
+impl ToValueColumn for String {
+    fn to_value(&self) -> Option<Value> {
+        Some(Value::Text(self.clone()))
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some("?")
+    }
+}
+
+impl ToValueColumn for &str {
+    fn to_value(&self) -> Option<Value> {
+        Some(Value::Text(self.to_string()))
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some("?")
+    }
+}
+
+impl ToValueColumn for i64 {
+    fn to_value(&self) -> Option<Value> {
+        Some(Value::Integer(*self))
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some("?")
+    }
+}
+
+impl ToValueColumn for f64 {
+    fn to_value(&self) -> Option<Value> {
+        Some(Value::Real(*self))
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some("?")
+    }
+}
+
+impl ToValueColumn for Vec<u8> {
+    fn to_value(&self) -> Option<Value> {
+        Some(Value::Blob(self.to_vec()))
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some("?")
+    }
+}
+
+impl ToValueColumn for &[u8] {
+    fn to_value(&self) -> Option<Value> {
+        Some(Value::Blob(self.to_vec()))
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some("?")
+    }
+}
+
+impl ToValueColumn for Text {
+    fn to_value(&self) -> Option<Value> {
+        None
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some(self.0)
+    }
+}
+
+impl ToValueColumn for Integer {
+    fn to_value(&self) -> Option<Value> {
+        None
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some(self.0)
+    }
+}
+
+impl ToValueColumn for Blob {
+    fn to_value(&self) -> Option<Value> {
+        None
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some(self.0)
+    }
+}
+
+impl ToValueColumn for Real {
+    fn to_value(&self) -> Option<Value> {
+        None
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some(self.0)
+    }
+}
+
+pub fn eq(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
+    let value = right.to_value();
     let op = match value {
-        Value::Null => "is not",
-        _ => "!=",
+        Some(val) => match val {
+            Value::Null => "is",
+            _ => "=",
+        },
+        None => "=",
     };
+    let params = right.to_params();
     Sql {
-        clause: format!("{} {} {}", left.to_column(), op, value.to_column()),
-        params: params_from_value(value),
+        clause: format!("{} {} {}", left.to_column(), op, right.to_placeholder()),
+        params,
     }
 }
 
-pub fn gt(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+pub fn ne(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
+    let value = right.to_value();
+    let op = if let Some(value) = value {
+        match value {
+            Value::Null => "is not",
+            _ => "!=",
+        }
+    } else {
+        "!="
+    };
+    let params = right.to_params();
+    Sql {
+        clause: format!("{} {} {}", left.to_column(), op, right.to_placeholder()),
+        params,
+    }
+}
+
+pub fn gt(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
     Sql {
         clause: format!("{} > ?", left.to_column()),
-        params: params_from_value(right.into()),
+        params: right.to_params(),
     }
 }
 
-pub fn lt(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+pub fn lt(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
     Sql {
         clause: format!("{} < ?", left.to_column()),
-        params: params_from_value(right.into()),
+        params: right.to_params(),
     }
 }
 
-pub fn gte(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+pub fn gte(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
     Sql {
         clause: format!("{} >= ?", left.to_column()),
-        params: params_from_value(right.into()),
+        params: right.to_params(),
     }
 }
 
-pub fn lte(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+pub fn lte(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
     Sql {
         clause: format!("{} <= ?", left.to_column()),
-        params: params_from_value(right.into()),
+        params: right.to_params(),
     }
 }
 
-pub fn like(left: impl ToColumn, right: impl Into<Value>) -> Sql {
+pub fn like(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
     Sql {
         clause: format!("{} like ?", left.to_column()),
-        params: params_from_value(right.into()),
+        params: right.to_params(),
     }
 }
 
-pub fn r#in(left: impl ToColumn, right: Vec<impl Into<Value>>) -> Sql {
+pub fn r#in(left: impl ToColumn, right: Vec<impl ToValueColumn>) -> Sql {
     Sql {
         clause: format!(
             "{} in ({})",
@@ -964,99 +1026,8 @@ pub fn r#in(left: impl ToColumn, right: Vec<impl Into<Value>>) -> Sql {
         ),
         params: right
             .into_iter()
-            .map(|val| val.into())
+            .filter_map(|val| val.to_value())
             .collect::<Vec<Value>>(),
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Value {
-    Lit(&'static str),
-    Text(std::sync::Arc<str>),
-    Blob(Vec<u8>),
-    Real(f64),
-    Integer(i64),
-    Null,
-}
-
-impl From<String> for Value {
-    fn from(value: String) -> Self {
-        Value::Text(value.into())
-    }
-}
-
-impl From<Text> for Value {
-    fn from(value: Text) -> Self {
-        Value::Lit(value.0)
-    }
-}
-
-impl From<NullText> for Value {
-    fn from(_: NullText) -> Self {
-        Value::Null
-    }
-}
-
-impl From<Integer> for Value {
-    fn from(value: Integer) -> Self {
-        Value::Lit(value.0)
-    }
-}
-
-impl From<Real> for Value {
-    fn from(value: Real) -> Self {
-        Value::Lit(value.0)
-    }
-}
-
-impl From<Blob> for Value {
-    fn from(value: Blob) -> Self {
-        Value::Lit(value.0)
-    }
-}
-
-impl From<&String> for Value {
-    fn from(value: &String) -> Self {
-        Value::Text(value.clone().into())
-    }
-}
-
-impl From<&str> for Value {
-    fn from(value: &str) -> Self {
-        Value::Text(value.into())
-    }
-}
-
-impl From<std::sync::Arc<str>> for Value {
-    fn from(value: std::sync::Arc<str>) -> Self {
-        Value::Text(value)
-    }
-}
-
-impl From<i64> for Value {
-    fn from(value: i64) -> Self {
-        Value::Integer(value)
-    }
-}
-
-impl From<f64> for Value {
-    fn from(value: f64) -> Self {
-        Value::Real(value)
-    }
-}
-
-impl From<Vec<u8>> for Value {
-    fn from(value: Vec<u8>) -> Self {
-        Value::Blob(value)
-    }
-}
-
-impl From<Option<u16>> for Value {
-    fn from(value: Option<u16>) -> Self {
-        match value {
-            Some(val) => Value::Integer(val.into()),
-            None => Value::Null,
-        }
     }
 }
 
@@ -1107,74 +1078,7 @@ pub enum Error {
     Serialize(#[from] serde_rusqlite::Error),
 }
 
-impl std::fmt::Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Lit(str) => f.write_str(str),
-            _ => f.write_str("?"),
-        }
-    }
-}
-
-pub trait ToSql {
-    fn to_sql(&self) -> Value;
-}
-
-impl ToSql for &'static str {
-    fn to_sql(&self) -> Value {
-        Value::Text(self.to_owned().into())
-    }
-}
-
-impl ToSql for i64 {
-    fn to_sql(&self) -> Value {
-        Value::Integer(*self)
-    }
-}
-
-impl ToSql for f64 {
-    fn to_sql(&self) -> Value {
-        Value::Real(*self)
-    }
-}
-
-impl ToSql for Vec<u8> {
-    fn to_sql(&self) -> Value {
-        Value::Blob(self.clone())
-    }
-}
-
-impl ToSql for Integer {
-    fn to_sql(&self) -> Value {
-        Value::Lit(self.0)
-    }
-}
-
-impl ToSql for Blob {
-    fn to_sql(&self) -> Value {
-        Value::Lit(self.0)
-    }
-}
-
-impl ToSql for Real {
-    fn to_sql(&self) -> Value {
-        Value::Lit(self.0)
-    }
-}
-
-impl ToSql for Text {
-    fn to_sql(&self) -> Value {
-        Value::Lit(self.0)
-    }
-}
-
-impl ToSql for NullText {
-    fn to_sql(&self) -> Value {
-        Value::Null
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Sql {
     pub clause: String,
     pub params: Vec<Value>,
