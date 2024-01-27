@@ -2,7 +2,7 @@
 
 ryzz is an automatic migration generator and query builder for sqlite in rust.
 
-- Schema is auto migrated by `#[table]` structs
+- Automatic append only migrations
 - Sql-like syntax
 - Query builder not an orm
 
