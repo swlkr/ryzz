@@ -1334,7 +1334,7 @@ mod tests {
     async fn readme_works() -> Result<(), ryzz::Error> {
         use ryzz::*;
 
-        #[table]
+        #[table("posts")]
         struct Post {
             #[ryzz(pk)]
             id: i64,
@@ -1347,7 +1347,7 @@ mod tests {
             #[ryzz(pk)]
             id: i64,
             body: String,
-            #[ryzz(refs = "Post(id)")]
+            #[ryzz(refs = "posts(id)")]
             post_id: i64,
         }
 

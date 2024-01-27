@@ -17,7 +17,7 @@ cargo add ryzz
 ```rust
 use ryzz::*;
 
-#[table]
+#[table("posts")]
 struct Post {
     #[ryzz(pk)]
     id: i64,
@@ -30,7 +30,7 @@ struct Comment {
     #[ryzz(pk)]
     id: i64,
     body: String,
-    #[ryzz(refs = "Post(id)")]
+    #[ryzz(refs = "posts(id)")]
     post_id: i64,
 }
 ```
