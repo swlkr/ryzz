@@ -71,10 +71,10 @@ let deleted: Post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().a
 # Querying
 
 ```rust
-// select ... from comments
+// select ... from Comment
 let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
-// select ... from comments
+// select ... from Comment
 let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await?;
 ```
 
@@ -87,7 +87,7 @@ struct CommentWithPost {
     post: Post
 }
 
-// select ... from comments inner join posts on posts.id = comments.post_id
+// select ... from Comment inner join posts on posts.id = Comment.post_id
 let rows = db
     .select(())
     .from(comments)
