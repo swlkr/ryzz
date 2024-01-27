@@ -17,39 +17,20 @@ cargo add ryzz
 ```rust
 use ryzz::*;
 
-#[database]
-struct Database {
-    posts: Posts,
-    comments: Comments
-}
-
 #[table]
-struct Posts {
-  id: Pk<Integer>,
-  title: Null<Text>,
-  body: Text
-}
-
-#[table]
-struct Comments {
-    id: Pk<Integer>,
-    body: Text,
-    #[ryzz(references = "Posts(id)")]
-    post_id: Integer,
-}
-
- // (Posts) is optional; checks that your row types match the table types
-#[row(Posts)]
 struct Post {
-  id: i64,
-  title: Option<String>,
-  body: String
+    #[ryzz(pk)]
+    id: i64,
+    title: Option<String>,
+    body: String
 }
 
-#[row(Comments)]
+#[table]
 struct Comment {
+    #[ryzz(pk)]
     id: i64,
     body: String,
+    #[ryzz(refs = "Post(id)")]
     post_id: i64,
 }
 ```
@@ -57,10 +38,9 @@ struct Comment {
 # Insert, update and delete
 
 ```rust
-// automatically migrates tables and columns
 let db = Database::new("db.sqlite3").await?;
-
-let Database { posts, comments } = &db;
+let posts = Post::table(&db).await?;
+let comments = Comment::table(&db).await?;
 
 // insert into posts (id, body) values (?, ?) returning *
 let inserted: Post = db
@@ -138,7 +118,7 @@ db.create(&ix).await?;
 db.drop(&ix).await?;
 ```
 
-# Supported types
+# Sqlite to rust type map
 
 | Sqlite | Rust |
 | ------------- | ------------- |
@@ -152,5 +132,5 @@ db.drop(&ix).await?;
 
 On compile, the `#[table]` macro runs `create table if not exists` or `alter table add column` for any new structs or struct fields ryzz hasn't seen before.
 
-- Schema migrations are one-way, append-only. Inspired by [trevyn/turbosql](https://github.com/trevyn/turbosql)
-- When `Database::new()` is called, the append migrations are run
+- Schema migrations only ever create table or alter table add column. Inspired by [trevyn/turbosql](https://github.com/trevyn/turbosql)
+- When `<Your Table>::table(&db).await?` is called, the migrations are run.

@@ -1,69 +1,21 @@
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
-use std::{
-    collections::HashSet,
-    sync::{Mutex, MutexGuard},
-};
 use syn::{
-    parse::Parse, parse_macro_input, Attribute, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath,
-    Field, Ident, ItemStruct, Lit, LitStr, PathSegment, Result, Type,
+    parse::Parse, parse_macro_input, Attribute, DeriveInput, Error, Expr, ExprAssign, ExprLit,
+    ExprPath, Ident, ItemStruct, Lit, LitStr, PathSegment, Result, Type, TypePath,
 };
-
-static FIELDS: Mutex<Vec<(String, (String, String))>> = Mutex::new(vec![]);
-
-fn get_fields() -> MutexGuard<'static, Vec<(String, (String, String))>> {
-    FIELDS.lock().unwrap()
-}
 
 #[proc_macro_attribute]
-pub fn row(args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn row(_args: TokenStream, input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ItemStruct);
-    let args = parse_macro_input!(args as RowArgs);
-    match row_macro(args, input) {
-        Ok(s) => s.into(),
+    match row_macro(input) {
+        Ok(s) => s.to_token_stream().into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-fn row_macro(args: RowArgs, mut item_struct: ItemStruct) -> Result<TokenStream> {
-    // HACK checking for type matches between #[row] and #[table] structs
-    // Integer -> i64
-    // Text -> String
-    // Real -> f64
-    // Blob -> Vec<u8>
-    // Null -> Option<T>
-    let fields = get_fields();
-    let table_fields = if let Some(ref struct_name) = args.struct_name {
-        let struct_str = struct_name.to_string();
-        fields
-            .iter()
-            .filter(|field| field.0 == struct_str)
-            .map(|field| &field.1)
-            .collect::<Vec<_>>()
-    } else {
-        vec![]
-    };
-
-    // HACK check for missing field in row
-    let table_hash = table_fields
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<HashSet<_>>();
-    let row_hash = &item_struct
-        .fields
-        .iter()
-        .map(|field| field.ident.clone().expect("named field").to_string())
-        .collect::<HashSet<_>>();
-    let missing_row_fields = table_hash.difference(&row_hash);
-
-    for missing_field in missing_row_fields {
-        return Err(syn::Error::new(
-            item_struct.ident.span(),
-            format!("missing field {}", missing_field),
-        ));
-    }
-
+fn row_macro(mut item_struct: ItemStruct) -> Result<TokenStream2> {
     for field in &mut item_struct.fields {
         if field.attrs.iter().any(|attr| {
             let ident = if let Some(segment) = attr.path.segments.last() {
@@ -79,43 +31,12 @@ fn row_macro(args: RowArgs, mut item_struct: ItemStruct) -> Result<TokenStream> 
             let attr: Attribute = syn::parse_quote! { #[serde(default)] };
             field.attrs.push(attr);
         }
-
-        let table_field = table_fields
-            .iter()
-            .find(|f| f.0 == field.ident.as_ref().expect("named field").to_string());
-        if let Some((table_field_name, table_field_type)) = table_field {
-            let row_field_type = type_name(&field.ty)?;
-            let r#type = match table_field_type.as_str() {
-                "Integer" => "i64",
-                "Text" => "String",
-                "Real" => "f64",
-                "Blob" => "Vec<u8>",
-                // TODO: Null
-                _ => unimplemented!(),
-            };
-            if row_field_type != r#type {
-                let compile_error = format!(
-                    "table {} with field {} and sql type {} expects type {}",
-                    &args.struct_name.unwrap(),
-                    table_field_name,
-                    table_field_type,
-                    r#type
-                );
-
-                return Err(syn::Error::new(
-                    field.ident.clone().expect("named field").span(),
-                    compile_error,
-                ));
-            }
-        } else {
-        }
     }
 
     Ok(quote! {
-        #[derive(Row, Default, serde::Serialize, serde::Deserialize, Debug)]
+        #[derive(Row, Default, serde::Serialize, serde::Deserialize, Debug, Clone)]
         #item_struct
-    }
-    .into())
+    })
 }
 
 #[proc_macro_derive(Row, attributes(ryzz))]
@@ -186,170 +107,144 @@ impl Parse for Args {
     }
 }
 
-struct RowArgs {
-    struct_name: Option<Ident>,
-}
-
-impl Parse for RowArgs {
-    fn parse(input: syn::parse::ParseStream) -> Result<Self> {
-        let struct_name = input.parse::<Ident>().ok();
-
-        Ok(Self { struct_name })
+#[proc_macro_attribute]
+pub fn table(args: TokenStream, input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(args as Args);
+    let input = parse_macro_input!(input as ItemStruct);
+    match table_macro(args, input) {
+        Ok(s) => s.to_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
     }
 }
 
-#[proc_macro_attribute]
-pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let item_struct = parse_macro_input!(input as ItemStruct);
-    let table_idents = item_struct
+// this creates a table struct and derives row on the given struct
+fn table_macro(args: Args, mut row_struct: ItemStruct) -> Result<TokenStream2> {
+    let Args { name } = args;
+    let row_ident = &row_struct.ident;
+    let name = if let Some(name) = name {
+        name
+    } else {
+        LitStr::new(&row_ident.to_string(), row_ident.span())
+    };
+    let row_attrs = row_struct.attrs;
+    let table_struct_name = format!("{}Table", row_ident);
+    let table_struct_ident = Ident::new(&table_struct_name, row_ident.span());
+    let table_fields = row_struct
         .fields
         .iter()
-        .map(|Field { ty, .. }| ty)
-        .collect::<Vec<_>>();
-    let initialize_lines = item_struct
-        .fields
+        .map(|field| {
+            let ident = field
+                .ident
+                .as_ref()
+                .ok_or(Error::new(row_ident.span(), "Named fields only"))?;
+            let attrs = &field.attrs;
+            let ty_string = &field.ty.to_token_stream().to_string();
+            let vis = &field.vis;
+            let span = if let Some(ty_ident) = type_ident(&field.ty) {
+                ty_ident.span()
+            } else {
+                ident.span()
+            };
+            match ty_string.as_str() {
+                "i64" | "Option < i64 >" => Ok(quote! { #(#attrs)* #vis #ident: ryzz::Integer }),
+                "f64" | "Option < f64 > " => Ok(quote! { #(#attrs)* #vis #ident: ryzz::Real }),
+                "Vec<u8>" | "Option < Vec < u8 > >" => {
+                    Ok(quote! { #(#attrs)* #vis #ident: ryzz::Blob })
+                }
+                "String" => Ok(quote! { #(#attrs)* #vis #ident: ryzz::Text }),
+                "Option < String >" => Ok(quote! { #(#attrs)* #vis #ident: ryzz::NullText }),
+                _ => Err(Error::new(
+                    span,
+                    "T must be i64, String, f64, Vec<u8> or Option<T>",
+                )),
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let table_alias = match row_attrs
         .iter()
-        .map(|Field { ty, ident, .. }| {
-            quote! { #ident: #ty::new() }
+        .filter_map(|attr| attr.parse_args::<RyzzAttr>().ok())
+        .find(|attr| attr.r#as.is_some())
+    {
+        Some(RyzzAttr { r#as, .. }) => quote! { #[ryzz(r#as = #r#as)] },
+        None => quote! {},
+    };
+
+    // strip ryzz attrs from row_struct itself
+    row_struct.attrs = row_attrs
+        .iter()
+        .filter_map(|attr| match attr.parse_args::<RyzzAttr>() {
+            Ok(_) => None,
+            Err(_) => Some(attr.clone()),
         })
         .collect::<Vec<_>>();
 
-    let ident = &item_struct.ident;
+    // strip ryzz attrs from row_struct fields
+    for field in &mut row_struct.fields {
+        field.attrs = field
+            .attrs
+            .iter()
+            .filter_map(|x| match x.parse_args::<RyzzAttr>() {
+                Ok(_) => None,
+                Err(_) => Some(x.clone()),
+            })
+            .collect::<Vec<_>>();
+    }
 
-    let output = quote! {
-        static RYZZ_CONNECTION: std::sync::OnceLock<tokio_rusqlite::Connection> = std::sync::OnceLock::new();
+    Ok(quote! {
+        #[row]
+        #(#row_attrs)*
+        #row_struct
 
-        #[derive(Debug, Clone)]
-        #item_struct
+        #[derive(ryzz::Table, Clone, Copy, Debug, Default)]
+        #table_alias
+        #[ryzz(table = #name)]
+        pub struct #table_struct_ident {
+            #(#table_fields,)*
+        }
 
-        impl #ident {
-            async fn new(s: &str) -> core::result::Result<Self, ryzz::Error> {
-                let connection = ryzz::Connection::default(s);
-
-                let db = Self::connect(connection).await?;
-
-                db.migrate().await?;
-
-                Ok(db)
-            }
-
-            async fn connect(c: ryzz::Connection) -> core::result::Result<Self, ryzz::Error> {
-                match RYZZ_CONNECTION.get() {
-                    Some(conn) => {},
-                    None => {
-                        let connection = c.open().await?;
-                        RYZZ_CONNECTION.set(connection).expect("Could not store connection");
-                        RYZZ_CONNECTION.get().expect("Could not retrieve connection");
-                    }
-                };
-
-                let db = Self {
-                    #(#initialize_lines,)*
-                };
-
-                Ok(db)
-            }
-
-            async fn with(c: ryzz::Connection) -> core::result::Result<Self, ryzz::Error> {
-                let db = Self::connect(c).await?;
-
-                db.migrate().await?;
-
-                Ok(db)
-            }
-
-            fn tables() -> Vec<Box<dyn ryzz::Table + Send + Sync + 'static>> {
-                vec![#(Box::new(#table_idents::new()),)*]
-            }
-
-            fn connection(&self) -> &'static tokio_rusqlite::Connection {
-                RYZZ_CONNECTION.get().expect("Failed to acquire connection")
-            }
-
-            async fn migrate(&self) -> core::result::Result<usize, ryzz::Error> {
-                let sqlite_schema = ryzz::SqliteSchema::new();
-
-                let db_table_names = self
-                    .select(())
-                    .from(&sqlite_schema)
-                    .r#where(eq(sqlite_schema.r#type, "table"))
-                    .all::<ryzz::TableName>()
-                    .await?
-                    .into_iter()
-                    .map(|x| ryzz::TableName { name: x.name })
-                    .collect::<std::collections::HashSet<_>>();
-
-                let tables = Self::tables();
-                let table_names = tables
-                    .iter()
-                    .map(|t| ryzz::TableName { name: t.table_name().to_owned() })
-                    .collect::<std::collections::HashSet<_>>();
-
-                let difference = table_names.difference(&db_table_names);
-
-                let tables_to_create = difference
-                    .into_iter()
-                    .filter_map(|x| {
-                        tables
-                            .iter()
-                            .find(|t| t.table_name() == x.name)
-                    })
-                    .collect::<Vec<_>>();
-
-                if !tables_to_create.is_empty() {
-                    println!("=== Creating tables ===");
-                    let statements = tables_to_create
-                        .iter()
-                        .map(|x| x.create_table_sql())
-                        .collect::<Vec<_>>();
-                    let _ = self
-                        .execute_batch(&format!("BEGIN;{}COMMIT;", statements.join(";")))
-                        .await?;
-                    for statement in statements {
-                        println!("{}", statement);
-                    }
-                    println!("=== Tables created successfully ===");
+        impl #row_ident {
+            pub async fn table(db: &ryzz::Database) -> core::result::Result<#table_struct_ident, ryzz::Error> {
+                let table = #table_struct_ident::new();
+                // create tables
+                let sql = table.create_table_sql();
+                let affected = db.execute(sql).await?;
+                if affected > 0 {
+                    println!("{}", sql);
                 }
 
-                let pti = ryzz::TableInfo::new();
+                let sqlite_schema = ryzz::SqliteSchemaTable::new();
+                let pti = ryzz::TableInfoTable::new();
 
-                let db_columns = self
+                // add columns
+                let db_columns = db
                     .select(())
-                    .from(&sqlite_schema)
-                    .left_outer_join(&pti, ne(pti.name, sqlite_schema.name))
-                    .r#where(eq(sqlite_schema.r#type, "table"))
+                    .from(sqlite_schema)
+                    .left_outer_join(pti, ryzz::ne(pti.name, sqlite_schema.name))
+                    .r#where(ryzz::and(ryzz::eq(sqlite_schema.r#type, "table"), ryzz::eq(sqlite_schema.name, table.table_name())))
                     .all::<ryzz::TableInfoRow>()
                     .await?
                     .into_iter()
-                    .map(|x| (x.table(), x.column()))
+                    .map(|x| x.column())
                     .collect::<std::collections::HashSet<_>>();
 
-                let columns = Self::tables()
-                    .iter()
-                    .flat_map(|t| {
-                        let column_names = t.column_names();
-                        t.column_names()
-                        .into_iter()
-                        .map(|c| (t.table_name().to_string(), c.to_string()))
-                        .collect::<Vec<_>>()
-                    })
+                let columns = table
+                    .column_names()
+                    .into_iter()
+                    .map(|c| c.to_string())
                     .collect::<std::collections::HashSet<_>>();
 
                 let difference = columns.difference(&db_columns);
-                let columns_to_add = difference
+                let statements = difference
                     .into_iter()
-                    .filter_map(|x| {
-                        match tables.iter().find(|t| t.table_name() == x.0) {
-                            Some(table) => Some(table.add_column_sql(x.1.as_str())),
-                            None => None
-                        }
+                    .map(|col| {
+                        table.add_column_sql(&col)
                     })
                     .collect::<Vec<_>>();
 
-                if !columns_to_add.is_empty() {
+                if !statements.is_empty() {
                     println!("=== Adding columns ===");
-                    let statements = &columns_to_add;
-                    let _ = self
+                    let _ = db
                         .execute_batch(&format!("BEGIN;{}COMMIT;", statements.join(";")))
                         .await?;
                     for statement in statements {
@@ -358,75 +253,10 @@ pub fn database(_args: TokenStream, input: TokenStream) -> TokenStream {
                     println!("=== Columns added successfully ===");
                 }
 
-                Ok(tables_to_create.len() + columns_to_add.len())
+                Ok(table)
             }
-
-            pub async fn execute_batch(&self, sql: &str) -> core::result::Result<(), ryzz::Error> {
-                let sql: std::sync::Arc<str> = sql.into();
-                self.connection()
-                    .call(move |conn| conn.execute_batch(&sql))
-                    .await?;
-
-                Ok(())
-            }
-
-            pub async fn query<T: serde::de::DeserializeOwned + Send + 'static>(&self, sql: Sql) -> core::result::Result<Vec<T>, ryzz::Error> {
-                ryzz::rows::<T>(&self.connection(), sql).await
-            }
-
-            pub fn select(&self, columns: impl Select) -> Query {
-                Query::new(&self.connection()).select(columns)
-            }
-
-            pub fn insert_into(&self, table: &impl Table) -> Query {
-                Query::new(&self.connection()).insert_into(table)
-            }
-
-            pub fn delete_from<'a>(&'a self, table: &'a dyn Table) -> Query<'a> {
-                Query::new(&self.connection()).delete(table)
-            }
-
-            pub fn update<'a>(&'a self, table: &'a dyn Table) -> Query<'a> {
-                Query::new(&self.connection()).update(table)
-            }
-
-            pub async fn create<'a>(&'a self, index: &'a ryzz::Index<'a>) -> core::result::Result<(), ryzz::Error> {
-                let sql = index.to_create_sql();
-                println!("=== Creating index ===");
-                println!("{}", sql);
-                self.execute_batch(&sql).await?;
-                println!("=== Successfully created index ===");
-                Ok(())
-            }
-
-            pub async fn drop<'a>(&'a self, index: &'a ryzz::Index<'a>) -> core::result::Result<(), ryzz::Error> {
-                let sql = index.to_drop_sql();
-                println!("=== Dropping index ===");
-                println!("{}", sql);
-                self.execute_batch(&sql).await?;
-                println!("=== Successfully dropped index ===");
-                Ok(())
-            }
-
         }
-    };
-
-    output.into()
-}
-
-#[proc_macro_attribute]
-pub fn table(args: TokenStream, input: TokenStream) -> TokenStream {
-    let Args { name: table_name } = parse_macro_input!(args as Args);
-    let input: TokenStream2 = input.into();
-
-    let output = quote! {
-        #[allow(dead_code)]
-        #[derive(Debug, Clone, Copy, Table, Default)]
-        #[ryzz(table = #table_name)]
-        #input
-    };
-
-    output.into()
+    })
 }
 
 #[proc_macro_derive(Table, attributes(ryzz))]
@@ -439,7 +269,6 @@ pub fn table_derive(s: TokenStream) -> TokenStream {
 }
 
 fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
-    let mut fields = get_fields();
     let struct_name = input.ident;
     let table_str = input
         .attrs
@@ -471,14 +300,6 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             .fields
             .iter()
             .map(|field| {
-                fields.push((
-                    struct_name.to_string(),
-                    (
-                        field.ident.as_ref().expect("named field").to_string(),
-                        type_name(&field.ty).expect("field with type Pk<T> or T"),
-                    ),
-                ));
-
                 (
                     field
                         .ident
@@ -519,20 +340,29 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             } else {
                 None
             };
-            let column_type = column_type(ty).expect("expected Pk<T>, Null<T> or T");
+            let name = if let Some(ref attr) = ryzz_attr {
+                if let Some(name) = &attr.name {
+                    name.value()
+                } else {
+                    ident.to_string()
+                }
+            } else {
+                ident.to_string()
+            };
+            let type_ident = type_ident(&ty)?.to_string().to_ascii_lowercase();
             let mut parts = vec![
-                Some(ident.to_string()),
-                Some(column_type.ident().to_string()),
-                match column_type.is_pk() {
-                    true => Some("primary key".into()),
-                    false => None,
-                },
-                match column_type.is_not_null() {
-                    true => Some("not null".into()),
-                    false => None,
+                Some(name),
+                Some(type_ident.replace("null", "")),
+                match type_ident.contains("null") {
+                    true => None,
+                    false => Some("not null".into()),
                 },
             ];
             if let Some(ryzz_attr) = ryzz_attr {
+                let primary_key = match ryzz_attr.pk {
+                    true => Some("primary key".into()),
+                    false => None,
+                };
                 let unique = match ryzz_attr.unique {
                     true => Some("unique".into()),
                     false => None,
@@ -545,7 +375,7 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
                     Some(rf) => Some(format!("references {}", rf.value())),
                     None => None,
                 };
-                parts.extend(vec![unique, default_value, references]);
+                parts.extend(vec![primary_key, unique, default_value, references]);
             }
             Some(
                 parts
@@ -557,7 +387,7 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         })
         .collect::<Vec<_>>();
     let column_def_sql = column_defs.join(",");
-    let attrs = attrs
+    let new_fields = attrs
         .iter()
         .map(|(ident, ty, attrs)| {
             let ryzz_attr = if let Some(attr) = attrs.iter().nth(0) {
@@ -575,19 +405,7 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             };
 
             let value = format!("{}.{}", table_name, name);
-            let column_type = column_type(ty)?;
-
-            Ok(match column_type {
-                ColumnType::Pk(type_ident) => quote! {
-                    #ident: ryzz::Pk(ryzz::#type_ident(#value))
-                },
-                ColumnType::NotNull(type_ident) => quote! {
-                    #ident: ryzz::#type_ident(#value)
-                },
-                ColumnType::Null(type_ident) => quote! {
-                    #ident: ryzz::Null(#type_ident(#value))
-                },
-            })
+            Ok(quote! { #ident: #ty(#value) })
         })
         .collect::<Result<Vec<_>>>()?;
     let create_table_sql = format!(
@@ -599,7 +417,7 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         impl ryzz::Table for #struct_name {
             fn new() -> Self {
                 Self {
-                    #(#attrs,)*
+                    #(#new_fields,)*
                 }
             }
 
@@ -632,12 +450,6 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
                 }
             }
         }
-
-        impl ryzz::ToSql for #struct_name {
-            fn to_sql(&self) -> ryzz::Value {
-                ryzz::Value::Lit(self.table_name())
-            }
-        }
     })
 }
 
@@ -657,26 +469,20 @@ impl Parse for RyzzAttr {
                                 "table" => {
                                     ryzz_attr.table_name = Some(lit_str.clone());
                                 }
-                                "r#default" => {
+                                "def" => {
                                     ryzz_attr.default_value = Some(lit_str.clone());
                                 }
                                 "columns" => {
                                     ryzz_attr.columns = Some(lit_str.clone());
                                 }
-                                "references" => {
+                                "refs" => {
                                     ryzz_attr.references = Some(lit_str.clone());
-                                }
-                                "many" => {
-                                    ryzz_attr.rel = Some(Rel::Many(lit_str.clone()));
                                 }
                                 "from" => {
                                     ryzz_attr.from = Some(lit_str.clone());
                                 }
                                 "to" => {
                                     ryzz_attr.to = Some(lit_str.clone());
-                                }
-                                "one" => {
-                                    ryzz_attr.rel = Some(Rel::One(lit_str.clone()));
                                 }
                                 "name" => {
                                     ryzz_attr.name = Some(lit_str.clone());
@@ -700,8 +506,7 @@ impl Parse for RyzzAttr {
                         .to_string()
                         .as_ref()
                     {
-                        "not_null" => ryzz_attr.not_null = true,
-                        "primary_key" => ryzz_attr.primary_key = true,
+                        "pk" => ryzz_attr.pk = true,
                         "unique" => ryzz_attr.unique = true,
                         _ => {}
                     },
@@ -715,102 +520,29 @@ impl Parse for RyzzAttr {
     }
 }
 
-fn type_name(ty: &Type) -> Result<String> {
-    Ok(type_path_ident(ty)?.to_string())
-}
-
-fn type_path_ident(ty: &Type) -> Result<Ident> {
-    Ok(match &ty {
-        syn::Type::Path(syn::TypePath { path, .. }) => path
-            .segments
-            .last()
-            .ok_or(syn::Error::new(
-                Span::call_site(),
-                "expected struct with named fields",
-            ))?
-            .ident
-            .clone(),
-        _ => unimplemented!(),
-    })
-}
-
-fn column_type(ty: &Type) -> Result<ColumnType> {
+fn type_ident<'a>(ty: &'a Type) -> Option<&'a Ident> {
     match &ty {
-        syn::Type::Path(type_path) => {
-            let syn::TypePath { path, .. } = type_path;
-            let segment = path.segments.last().ok_or(syn::Error::new(
-                Span::call_site(),
-                "expected struct with named fields",
-            ))?;
-            let ident = &segment.ident;
-
-            match &segment.arguments {
-                syn::PathArguments::AngleBracketed(angle) => {
-                    match angle.args.last().expect("Should be Pk<T> or T") {
-                        syn::GenericArgument::Type(ty) => match ident.to_string().as_str() {
-                            "Pk" => Ok(ColumnType::Pk(type_path_ident(&ty)?)),
-                            "Null" => Ok(ColumnType::Null(type_path_ident(&ty)?)),
-                            _ => unimplemented!(),
-                        },
-                        _ => unimplemented!(),
-                    }
-                }
-                syn::PathArguments::None => Ok(ColumnType::NotNull(ident.clone())),
-                _ => unimplemented!(),
+        syn::Type::Path(TypePath { path, .. }) => {
+            if let Some(seg) = path.segments.last() {
+                Some(&seg.ident)
+            } else {
+                None
             }
         }
-        _ => unimplemented!(),
+        _ => None,
     }
-}
-
-enum ColumnType {
-    Pk(Ident),
-    NotNull(Ident),
-    Null(Ident),
-}
-
-impl ColumnType {
-    fn is_pk(&self) -> bool {
-        match self {
-            ColumnType::Pk(_) => true,
-            _ => false,
-        }
-    }
-
-    fn is_not_null(&self) -> bool {
-        match self {
-            ColumnType::NotNull(_) => true,
-            _ => false,
-        }
-    }
-
-    fn ident(&self) -> Ident {
-        match self {
-            ColumnType::Pk(ident) => ident,
-            ColumnType::NotNull(ident) => ident,
-            ColumnType::Null(ident) => ident,
-        }
-        .clone()
-    }
-}
-
-enum Rel {
-    One(LitStr),
-    Many(LitStr),
 }
 
 #[derive(Default)]
 struct RyzzAttr {
     table_name: Option<LitStr>,
-    primary_key: bool,
-    not_null: bool,
+    pk: bool,
     unique: bool,
     default_value: Option<LitStr>,
     columns: Option<LitStr>,
     references: Option<LitStr>,
     from: Option<LitStr>,
     to: Option<LitStr>,
-    rel: Option<Rel>,
     name: Option<LitStr>,
     r#as: Option<LitStr>,
 }

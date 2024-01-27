@@ -2,7 +2,7 @@
 //!
 extern crate self as ryzz;
 use rusqlite::OpenFlags;
-pub use ryzz_macros::{database, row, table, Row, Table};
+pub use ryzz_macros::{row, table, Row, Table};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{fmt::Display, sync::Arc};
 pub use tokio_rusqlite;
@@ -123,15 +123,16 @@ impl Connection {
 
 #[table("sqlite_schema")]
 pub struct SqliteSchema {
-    pub name: Text,
+    pub name: String,
     #[ryzz(name = "type")]
-    pub r#type: Text,
+    pub r#type: String,
+    pub sql: String,
 }
 
 #[table("pragma_table_info(sqlite_schema.name)")]
 #[ryzz(r#as = "pti")]
 pub struct TableInfo {
-    pub name: Text,
+    pub name: String,
 }
 
 #[row]
@@ -221,15 +222,15 @@ fn unqualify(s: &str) -> String {
 }
 
 #[table("ryzz_migrations")]
-struct Migrations {
-    #[ryzz(not_null, unique)]
-    sql: Text,
-}
-
-#[row]
 struct Migration {
+    #[ryzz(unique)]
     sql: String,
 }
+
+// #[row]
+// struct Migration {
+//     sql: String,
+// }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalMode {
@@ -334,15 +335,17 @@ pub async fn rows<T: DeserializeOwned + Send + 'static>(
             let rows = stmt.query(&*params)?;
             // HACK there is only ever one column, it should always be valid json
             rows.mapped(|row| {
-                let x: String = row.get(0)?;
-                let y = serde_json::from_str::<T>(&x).unwrap();
-                Ok(y)
+                let json: String = row.get(0)?;
+                Ok(json)
             })
             .collect::<Result<Vec<_>, rusqlite::Error>>()
         })
         .await?;
 
-    Ok(results)
+    results
+        .into_iter()
+        .map(|json| Ok(serde_json::from_str::<T>(&json)?))
+        .collect::<Result<Vec<T>, Error>>()
 }
 
 pub fn asc(col: impl ToColumn) -> Sql {
@@ -396,15 +399,6 @@ fn json_object(tbl: &Tbl, r#as: bool) -> String {
             .join(","),
         r#as
     )
-}
-
-impl<'a> From<&'a dyn Table> for Tbl<'a> {
-    fn from(value: &'a dyn Table) -> Self {
-        Tbl {
-            table_name: Some(value.table_name()),
-            column_names: value.column_names(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -480,7 +474,7 @@ impl<'a> Query<'a> {
         self
     }
 
-    pub fn from(mut self, table: &impl Table) -> Self {
+    pub fn from(mut self, table: impl Table) -> Self {
         let tbl = Tbl {
             table_name: Some(table.table_name()),
             column_names: table.column_names(),
@@ -515,7 +509,7 @@ impl<'a> Query<'a> {
         self
     }
 
-    pub fn join(mut self, join_type: JoinType, outer: bool, table: &impl Table, sql: Sql) -> Self {
+    pub fn join(mut self, join_type: JoinType, outer: bool, table: impl Table, sql: Sql) -> Self {
         let clause = format!(
             "{} {} join {} {} on {}",
             join_type,
@@ -544,11 +538,11 @@ impl<'a> Query<'a> {
         self
     }
 
-    pub fn inner_join(self, table: &impl Table, sql: Sql) -> Self {
+    pub fn inner_join(self, table: impl Table, sql: Sql) -> Self {
         self.join(JoinType::Inner, false, table, sql)
     }
 
-    pub fn left_outer_join(self, table: &impl Table, sql: Sql) -> Self {
+    pub fn left_outer_join(self, table: impl Table, sql: Sql) -> Self {
         self.join(JoinType::Left, true, table, sql)
     }
 
@@ -683,7 +677,7 @@ impl<'a> Query<'a> {
         Ok(self)
     }
 
-    pub fn insert_into(mut self, table: &impl Table) -> Self {
+    pub fn insert_into(mut self, table: impl Table) -> Self {
         self.insert_into = Some(format!("insert into {}", table.table_name()).into());
         self.tables.push(Tbl {
             table_name: Some(table.table_name()),
@@ -737,9 +731,12 @@ impl<'a> Query<'a> {
         Ok(self)
     }
 
-    pub fn update(mut self, table: &'a dyn Table) -> Self {
+    pub fn update(mut self, table: impl Table) -> Self {
         self.update = Some(format!("update {}", table.table_name()).into());
-        self.tables.push(table.into());
+        self.tables.push(Tbl {
+            table_name: Some(table.table_name()),
+            column_names: table.column_names(),
+        });
         self
     }
 
@@ -759,9 +756,12 @@ impl<'a> Query<'a> {
         Ok(self)
     }
 
-    pub fn delete(mut self, table: &'a dyn Table) -> Self {
+    pub fn delete(mut self, table: impl Table) -> Self {
         self.delete = Some(format!("delete from {}", table.table_name()).into());
-        self.tables.push(table.into());
+        self.tables.push(Tbl {
+            table_name: Some(table.table_name()),
+            column_names: table.column_names(),
+        });
         self
     }
 
@@ -812,6 +812,9 @@ pub fn placeholder() -> &'static str {
 pub struct Text(pub &'static str);
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct NullText(pub &'static str);
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Blob(pub &'static str);
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -825,6 +828,12 @@ pub trait ToColumn {
 }
 
 impl ToColumn for Text {
+    fn to_column(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl ToColumn for NullText {
     fn to_column(&self) -> &'static str {
         self.0
     }
@@ -982,6 +991,12 @@ impl From<Text> for Value {
     }
 }
 
+impl From<NullText> for Value {
+    fn from(_: NullText) -> Self {
+        Value::Null
+    }
+}
+
 impl From<Integer> for Value {
     fn from(value: Integer) -> Self {
         Value::Lit(value.0)
@@ -1073,7 +1088,9 @@ pub enum Error {
     #[error("unique constraint failed: {0}")]
     UniqueConstraint(String),
     #[error("database error: {0}")]
-    Database(String),
+    TokioRusqlite(#[from] tokio_rusqlite::Error),
+    #[error("database error: {0}")]
+    Rusqlite(#[from] rusqlite::Error),
     #[error("missing from statement in sql query")]
     MissingFrom,
     #[error("error inserting record {0}")]
@@ -1085,58 +1102,9 @@ pub enum Error {
     #[error("could not find the row")]
     RowNotFound,
     #[error("could not deserialize rows {0}")]
-    Deserialize(String),
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(value: serde_json::Error) -> Self {
-        Self::Deserialize(value.to_string())
-    }
-}
-
-impl From<tokio_rusqlite::Error> for Error {
-    fn from(value: tokio_rusqlite::Error) -> Self {
-        match value {
-            tokio_rusqlite::Error::ConnectionClosed => Self::ConnectionClosed,
-            tokio_rusqlite::Error::Close((_, error)) => Self::Close(error.to_string()),
-            tokio_rusqlite::Error::Rusqlite(err) => match err {
-                rusqlite::Error::SqliteFailure(x, y) => match x.code {
-                    rusqlite::ErrorCode::ConstraintViolation => match x.extended_code {
-                        2067 => Self::UniqueConstraint(y.unwrap_or(x.to_string())),
-                        _ => Self::Database(x.to_string()),
-                    },
-                    _ => Self::Database(x.to_string()),
-                },
-                _ => Self::Database(err.to_string()),
-            },
-            _ => todo!(),
-        }
-    }
-}
-
-impl From<serde_rusqlite::Error> for Error {
-    fn from(value: serde_rusqlite::Error) -> Self {
-        match value {
-            serde_rusqlite::Error::Unsupported(_) => todo!(),
-            serde_rusqlite::Error::ValueTooLarge(_) => todo!(),
-            serde_rusqlite::Error::Serialization(_) => todo!(),
-            serde_rusqlite::Error::Deserialization {
-                column: _,
-                message: _,
-            } => todo!(),
-            serde_rusqlite::Error::Rusqlite(_) => todo!(),
-            serde_rusqlite::Error::ColumnNamesNotAvailable => todo!(),
-        }
-    }
-}
-
-impl From<rusqlite::Error> for Error {
-    fn from(value: rusqlite::Error) -> Self {
-        match value {
-            rusqlite::Error::ToSqlConversionFailure(err) => Self::SqlConversion(err.to_string()),
-            err => Self::Deserialize(err.to_string()),
-        }
-    }
+    Deserialize(#[from] serde_json::Error),
+    #[error("serialize error: {0}")]
+    Serialize(#[from] serde_rusqlite::Error),
 }
 
 impl std::fmt::Display for Value {
@@ -1200,15 +1168,16 @@ impl ToSql for Text {
     }
 }
 
-pub struct Sql {
-    pub clause: String,
-    pub params: Vec<Value>,
+impl ToSql for NullText {
+    fn to_sql(&self) -> Value {
+        Value::Null
+    }
 }
 
 #[derive(Clone, Debug)]
-pub struct Schema {
-    pub tables: Vec<(&'static str, &'static str)>,
-    pub indices: Vec<(&'static str, &'static str)>,
+pub struct Sql {
+    pub clause: String,
+    pub params: Vec<Value>,
 }
 
 pub struct Index<'a> {
@@ -1248,7 +1217,7 @@ impl<'a> Index<'a> {
         self
     }
 
-    pub fn on(mut self, table: &'a impl Table, columns: impl Select) -> Self {
+    pub fn on(mut self, table: impl Table, columns: impl Select) -> Self {
         self.columns = columns
             .columns()
             .into_iter()
@@ -1265,23 +1234,96 @@ pub fn index<'a>(name: &'a str) -> Index<'a> {
     Index::new(name)
 }
 
-#[allow(dead_code)]
-#[derive(Default, Clone, Copy, Debug)]
-pub struct Pk<T: ToColumn>(T);
-
-impl<T: ToColumn> ToColumn for Pk<T> {
-    fn to_column(&self) -> &'static str {
-        self.0.to_column()
-    }
+#[derive(Clone, Debug)]
+pub struct Database {
+    pub connection: tokio_rusqlite::Connection,
 }
 
-#[allow(dead_code)]
-#[derive(Default, Clone, Copy, Debug)]
-pub struct Null<T: ToColumn>(T);
+impl Database {
+    pub async fn new(path: &str) -> Result<Self, Error> {
+        Ok(Self {
+            connection: Connection::default(path).open().await?,
+        })
+    }
 
-impl<T: ToColumn> ToColumn for Null<T> {
-    fn to_column(&self) -> &'static str {
-        self.0.to_column()
+    pub async fn with(connection: Connection) -> Result<Self, Error> {
+        Ok(Self {
+            connection: connection.open().await?,
+        })
+    }
+
+    pub async fn execute_batch(&self, sql: &str) -> Result<(), Error> {
+        let sql: Arc<str> = sql.into();
+        self.connection
+            .call(move |conn| conn.execute_batch(&sql))
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn execute(&self, sql: &str) -> Result<usize, Error> {
+        let sql: Arc<str> = sql.into();
+        let affected = self
+            .connection
+            .call(move |conn| conn.execute(&sql, ()))
+            .await?;
+
+        Ok(affected)
+    }
+
+    pub async fn query<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        sql: Sql,
+    ) -> Result<Vec<T>, Error> {
+        ryzz::rows::<T>(&self.connection, sql).await
+    }
+
+    pub fn select(&self, columns: impl Select) -> Query {
+        Query::new(&self.connection).select(columns)
+    }
+
+    pub fn insert_into(&self, table: impl Table) -> Query {
+        Query::new(&self.connection).insert_into(table)
+    }
+
+    pub fn delete_from(&self, table: impl Table) -> Query {
+        Query::new(&self.connection).delete(table)
+    }
+
+    pub fn update(&self, table: impl Table) -> Query {
+        Query::new(&self.connection).update(table)
+    }
+
+    pub async fn create<'a>(&'a self, index: &'a Index<'a>) -> Result<(), Error> {
+        let sql = index.to_create_sql();
+        let rows = self.execute(&sql).await?;
+        if rows > 0 {
+            println!("{}", sql);
+        }
+        Ok(())
+    }
+
+    pub async fn drop<'a>(&'a self, index: &'a Index<'a>) -> Result<(), Error> {
+        let sql = index.to_drop_sql();
+        let rows = self.execute(&sql).await?;
+        if rows > 0 {
+            println!("{}", sql);
+        }
+        Ok(())
+    }
+
+    pub async fn schema(&self) -> Result<String, Error> {
+        let schema_table = SqliteSchemaTable::new();
+        let rows = self
+            .select(())
+            .from(schema_table)
+            .all::<SqliteSchema>()
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.sql.to_lowercase())
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }
 
@@ -1292,46 +1334,26 @@ mod tests {
     async fn readme_works() -> Result<(), ryzz::Error> {
         use ryzz::*;
 
-        #[database]
-        struct Database {
-            posts: Posts,
-            comments: Comments,
-        }
-
         #[table]
-        struct Posts {
-            id: Pk<Integer>,
-            title: Null<Text>,
-            body: Text,
-        }
-
-        #[table]
-        struct Comments {
-            id: Pk<Integer>,
-            body: Text,
-            #[ryzz(references = "Posts(id)")]
-            post_id: Integer,
-        }
-
-        #[row]
-        #[derive(PartialEq, Clone)]
         struct Post {
-            id: u64,
+            #[ryzz(pk)]
+            id: i64,
             title: Option<String>,
             body: String,
         }
 
-        #[row]
-        #[derive(PartialEq, Clone)]
+        #[table]
         struct Comment {
-            id: u64,
+            #[ryzz(pk)]
+            id: i64,
             body: String,
-            post_id: u64,
+            #[ryzz(refs = "Post(id)")]
+            post_id: i64,
         }
 
         let db = Database::new(":memory:").await?;
-
-        let Database { posts, comments } = &db;
+        let posts = Post::table(&db).await?;
+        let comments = Comment::table(&db).await?;
 
         // insert into posts (id, body) values (?, ?) returning *
         let inserted: Post = db
@@ -1403,7 +1425,10 @@ mod tests {
         let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows.into_iter().nth(0).unwrap(), new_comment);
+        let row = &rows[0];
+        assert_eq!(row.id, new_comment.id);
+        assert_eq!(row.body, new_comment.body);
+        assert_eq!(row.post_id, new_comment.post_id);
 
         let query = db
             .select((comments.id, comments.body))
@@ -1433,8 +1458,12 @@ mod tests {
             .all()
             .await?;
 
-        assert_eq!(rows[0].comment, new_comment);
-        assert_eq!(rows[0].post, inserted);
+        assert_eq!(rows[0].comment.id, new_comment.id);
+        assert_eq!(rows[0].comment.body, new_comment.body);
+        assert_eq!(rows[0].comment.post_id, new_comment.post_id);
+        assert_eq!(rows[0].post.id, inserted.id);
+        assert_eq!(rows[0].post.title, inserted.title);
+        assert_eq!(rows[0].post.body, inserted.body);
 
         let query = db.select(()).from(comments);
 
@@ -1456,28 +1485,15 @@ mod tests {
     async fn indexes_works() -> Result<(), ryzz::Error> {
         use ryzz::*;
 
-        #[database]
-        struct Database {
-            links: Links,
-        }
-
         #[table]
-        struct Links {
-            #[ryzz(primary_key)]
-            id: Integer,
-
-            #[ryzz(not_null)]
-            url: Text,
-        }
-
-        #[row]
         struct Link {
+            #[ryzz(pk)]
             id: i64,
             url: String,
         }
 
         let db = Database::new(":memory:").await?;
-        let Database { links } = &db;
+        let links = Link::table(&db).await?;
 
         let links_url_ix = index("links_url_ix").unique().on(links, links.url);
 
@@ -1530,66 +1546,45 @@ mod tests {
     async fn migrate_works() -> Result<(), ryzz::Error> {
         use ryzz::*;
 
-        let sqlite_file = "test.sqlite3";
-
-        std::fs::remove_file(sqlite_file).unwrap_or_default();
-
-        let conn = Connection::default(sqlite_file);
-
-        {
-            #[database]
-            struct Database {
-                links: Links,
-            }
-
-            #[table]
-            struct Links {
-                #[ryzz(primary_key)]
-                id: Integer,
-
-                #[ryzz(not_null)]
-                url: Text,
-            }
-
-            let db = Database::connect(conn.clone()).await?;
-
-            let changes = db.migrate().await?;
-
-            assert_eq!(changes, 1);
-
-            let changes = db.migrate().await?;
-
-            assert_eq!(changes, 0);
-        }
-
-        #[database]
-        struct Database {
-            links: Links,
-        }
-
-        #[table]
-        struct Links {
-            id: Pk<Integer>,
-            url: Text,
-            test: Null<Text>,
-        }
-
-        #[row]
+        #[table("links")]
         struct Link {
+            #[ryzz(pk)]
+            id: i64,
+            url: String,
+        }
+
+        let db = Database::new(":memory:").await?;
+        let links = Link::table(&db).await?;
+        let schema = db.schema().await?;
+
+        assert_eq!(
+            schema,
+            "create table links (id integer not null primary key,url text not null)"
+        );
+
+        let links = Link::table(&db).await?;
+        let schema = db.schema().await?;
+
+        assert_eq!(
+            schema,
+            "create table links (id integer not null primary key,url text not null)"
+        );
+
+        #[table("links")]
+        struct Link1 {
+            #[ryzz(pk)]
             id: i64,
             url: String,
             test: Option<String>,
         }
 
-        let db = Database::connect(conn).await?;
+        let links = Link1::table(&db).await?;
+        let schema = db.schema().await?;
 
-        let changes = db.migrate().await?;
-
-        assert_eq!(changes, 1);
-
-        let changes = db.migrate().await?;
-
-        assert_eq!(changes, 0);
+        assert_eq!(
+            schema,
+            "create table links (id integer not null primary key,url text not null, test text)"
+        );
 
         Ok(())
     }
