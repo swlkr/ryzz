@@ -128,9 +128,7 @@ db.drop(&ix).await?;
 | Null | None |
 | Blob | Vec&lt;u8&gt; |
 
-# Auto schema migrations
+# Automatic migrations
 
-On compile, the `#[table]` macro runs `create table if not exists` or `alter table add column` for any new structs or struct fields ryzz hasn't seen before.
-
-- Schema migrations only ever create table or alter table add column. Inspired by [trevyn/turbosql](https://github.com/trevyn/turbosql)
+- Schema migrations only ever `create table` or `alter table add column`. Inspired by [trevyn/turbosql](https://github.com/trevyn/turbosql)
 - When `<Your Table>::table(&db).await?` is called, the migrations are run.
