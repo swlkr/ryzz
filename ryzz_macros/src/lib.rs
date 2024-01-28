@@ -138,26 +138,40 @@ fn table_macro(args: Args, mut row_struct: ItemStruct) -> Result<TokenStream2> {
                 .as_ref()
                 .ok_or(Error::new(row_ident.span(), "Named fields only"))?;
             let attrs = &field.attrs;
-            let ty_string = &field.ty.to_token_stream().to_string();
+            // let ty_string = &field.ty.to_token_stream().to_string();
+            let type_col = type_col(&field.ty);
             let vis = &field.vis;
-            let span = if let Some(ty_ident) = type_ident(&field.ty) {
-                ty_ident.span()
+            let span = if let Some(col) = &type_col {
+                col.ident.span()
             } else {
                 ident.span()
             };
-            match ty_string.as_str() {
-                "i64" | "Option < i64 >" => Ok(quote! { #(#attrs)* #vis #ident: ryzz::Integer }),
-                "f64" | "Option < f64 > " => Ok(quote! { #(#attrs)* #vis #ident: ryzz::Real }),
-                "Vec<u8>" | "Option < Vec < u8 > >" => {
-                    Ok(quote! { #(#attrs)* #vis #ident: ryzz::Blob })
+            let ty = match type_col {
+                Some(col) => match (col.null, col.ident.to_string().as_str()) {
+                    (false, "i64") => quote! { ryzz::Integer },
+                    (false, "f64") => quote! { ryzz::Real },
+                    (false, "Vec<u8>") => quote! { ryzz::Blob },
+                    (false, "String") => quote! { ryzz::Text },
+                    (true, "i64") => quote! { ryzz::Null<ryzz::Integer> },
+                    (true, "f64") => quote! { ryzz::Null<ryzz::Real> },
+                    (true, "Vec<u8>") => quote! { ryzz::Null<ryzz::Blob> },
+                    (true, "String") => quote! { ryzz::Null<ryzz::Text> },
+                    _ => {
+                        return Err(Error::new(
+                            span,
+                            "T must be i64, String, f64, Vec<u8> or Option<T>",
+                        ))
+                    }
+                },
+                None => {
+                    return Err(Error::new(
+                        span,
+                        "T must be i64, String, f64, Vec<u8> or Option<T>",
+                    ))
                 }
-                "String" => Ok(quote! { #(#attrs)* #vis #ident: ryzz::Text }),
-                "Option < String >" => Ok(quote! { #(#attrs)* #vis #ident: ryzz::NullText }),
-                _ => Err(Error::new(
-                    span,
-                    "T must be i64, String, f64, Vec<u8> or Option<T>",
-                )),
-            }
+            };
+
+            Ok(quote! { #(#attrs)* #vis #ident: #ty })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -349,13 +363,16 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             } else {
                 ident.to_string()
             };
-            let type_ident = type_ident(&ty)?.to_string().to_ascii_lowercase();
+            let Some(type_col) = type_col(&ty) else {
+                return None;
+            };
             let mut parts = vec![
                 Some(name),
-                Some(type_ident.replace("null", "")),
-                match type_ident.contains("null") {
-                    true => None,
-                    false => Some("not null".into()),
+                Some(type_col.ident.to_string()),
+                if type_col.null {
+                    None
+                } else {
+                    Some("not null".into())
                 },
             ];
             if let Some(ryzz_attr) = ryzz_attr {
@@ -405,7 +422,13 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
             };
 
             let value = format!("{}.{}", table_name, name);
-            Ok(quote! { #ident: #ty(#value) })
+            Ok(
+                if ty.to_token_stream().to_string().contains("ryzz :: Null <") {
+                    quote! { #ident: ryzz::Null(ryzz::Text(#value)) }
+                } else {
+                    quote! { #ident: #ty(#value) }
+                },
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     let create_table_sql = format!(
@@ -525,6 +548,40 @@ fn type_ident<'a>(ty: &'a Type) -> Option<&'a Ident> {
         syn::Type::Path(TypePath { path, .. }) => {
             if let Some(seg) = path.segments.last() {
                 Some(&seg.ident)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+struct Col<'a> {
+    null: bool,
+    ident: &'a Ident,
+}
+
+fn type_col<'a>(ty: &'a Type) -> Option<Col> {
+    match &ty {
+        syn::Type::Path(TypePath { path, .. }) => {
+            if let Some(seg) = path.segments.last() {
+                match &seg.arguments {
+                    syn::PathArguments::None => Some(Col {
+                        null: false,
+                        ident: &seg.ident,
+                    }),
+                    syn::PathArguments::AngleBracketed(args) => match args.args.last() {
+                        Some(arg) => match arg {
+                            syn::GenericArgument::Type(ty) => Some(Col {
+                                null: true,
+                                ident: type_ident(&ty)?,
+                            }),
+                            _ => unimplemented!(),
+                        },
+                        None => unimplemented!(),
+                    },
+                    syn::PathArguments::Parenthesized(_) => unimplemented!(),
+                }
             } else {
                 None
             }

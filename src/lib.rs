@@ -593,7 +593,7 @@ impl<'a> Query<'a> {
         Ok(row)
     }
 
-    pub async fn prepare<T: Row + DeserializeOwned + Send + Sync + 'static>(
+    pub async fn prep<T: Row + DeserializeOwned + Send + Sync + 'static>(
         self,
     ) -> Result<Self, Error> {
         let sql = self.sql_statement::<T>();
@@ -611,7 +611,7 @@ impl<'a> Query<'a> {
         Ok(self)
     }
 
-    pub fn insert_into(mut self, table: impl Table) -> Self {
+    pub fn insert(mut self, table: impl Table) -> Self {
         self.insert_into = Some(format!("insert into {}", table.table_name()).into());
         self.tables.push(Tbl {
             table_name: Some(table.table_name()),
@@ -747,10 +747,10 @@ pub fn placeholder() -> &'static str {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Text(pub &'static str);
+pub struct Null<T: ToColumn>(T);
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NullText(pub &'static str);
+pub struct Text(pub &'static str);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Blob(pub &'static str);
@@ -771,9 +771,9 @@ impl ToColumn for Text {
     }
 }
 
-impl ToColumn for NullText {
+impl<T: ToColumn> ToColumn for Null<T> {
     fn to_column(&self) -> &'static str {
-        self.0
+        self.0.to_column()
     }
 }
 
@@ -823,7 +823,10 @@ pub trait ToValueColumn {
 
     fn to_params(&self) -> Vec<Value> {
         match self.to_value() {
-            Some(value) => vec![value],
+            Some(value) => match value {
+                Value::Null => vec![],
+                value => vec![value],
+            },
             None => vec![],
         }
     }
@@ -836,6 +839,16 @@ pub trait ToValueColumn {
             },
             None => self.to_column().unwrap_or(""),
         }
+    }
+}
+
+impl<T: ToColumn> ToValueColumn for Null<T> {
+    fn to_value(&self) -> Option<Value> {
+        None
+    }
+
+    fn to_column(&self) -> Option<&'static str> {
+        Some(self.0.to_column())
     }
 }
 
@@ -959,10 +972,8 @@ pub fn eq(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
         None => "=",
     };
     let params = right.to_params();
-    Sql {
-        clause: format!("{} {} {}", left.to_column(), op, right.to_placeholder()),
-        params,
-    }
+    let clause = format!("{} {} {}", left.to_column(), op, right.to_placeholder());
+    Sql { clause, params }
 }
 
 pub fn ne(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
@@ -1186,8 +1197,8 @@ impl Database {
         Query::new(&self.connection).select(columns)
     }
 
-    pub fn insert_into(&self, table: impl Table) -> Query {
-        Query::new(&self.connection).insert_into(table)
+    pub fn insert(&self, table: impl Table) -> Query {
+        Query::new(&self.connection).insert(table)
     }
 
     pub fn delete_from(&self, table: impl Table) -> Query {
@@ -1259,51 +1270,48 @@ mod tests {
         let posts = Post::table(&db).await?;
         let comments = Comment::table(&db).await?;
 
-        // insert into posts (id, body) values (?, ?) returning *
-        let inserted: Post = db
-            .insert_into(posts)
-            .values(Post {
-                id: 1,
-                title: None,
-                body: "".into(),
-            })?
-            .returning()
-            .await?;
+        let post = Post {
+            id: 1,
+            title: None,
+            body: "".into(),
+        };
 
-        assert_eq!(inserted.id, 1);
-        assert_eq!(inserted.body, "");
-        assert_eq!(inserted.title, None);
+        // insert into posts (id, body) values (?, ?) returning *
+        let mut post: Post = db.insert(posts).values(post)?.returning().await?;
+
+        assert_eq!(post.id, 1);
+        assert_eq!(post.body, "");
+        assert_eq!(post.title, None);
+
+        post.body = "post".into();
 
         // update posts set body = ?, id = ? where id = ? returning *
-        let updated: Post = db
+        let post: Post = db
             .update(posts)
-            .set(Post {
-                body: "post".into(),
-                ..inserted
-            })?
+            .set(post)?
             .r#where(eq(posts.id, 1))
             .returning()
             .await?;
 
-        assert_eq!(updated.id, 1);
-        assert_eq!(updated.body, "post");
+        assert_eq!(post.id, 1);
+        assert_eq!(post.body, "post");
 
         // delete from posts where id = ? returning *
-        let deleted: Post = db
+        let post: Post = db
             .delete_from(posts)
             .r#where(eq(posts.id, 1))
             .returning()
             .await?;
 
-        assert_eq!(deleted.id, 1);
-        assert_eq!(deleted.body, "post");
+        assert_eq!(post.id, 1);
+        assert_eq!(post.body, "post");
 
         let rows: Vec<Post> = db.select(()).from(posts).all().await?;
 
         assert_eq!(rows.len(), 0);
 
         let inserted: Post = db
-            .insert_into(posts)
+            .insert(posts)
             .values(Post {
                 title: None,
                 id: 1,
@@ -1321,7 +1329,7 @@ mod tests {
         };
 
         let comment: Comment = db
-            .insert_into(comments)
+            .insert(comments)
             .values(new_comment.clone())?
             .returning()
             .await?;
@@ -1372,7 +1380,7 @@ mod tests {
         let query = db.select(()).from(comments);
 
         // prepare the query
-        let prepared = query.prepare::<Comment>().await?;
+        let prepared = query.prep::<Comment>().await?;
 
         // execute the prepared query later
         let rows: Vec<Comment> = prepared.all().await?;
@@ -1404,7 +1412,7 @@ mod tests {
         db.create(&links_url_ix).await?;
 
         let rows = db
-            .insert_into(links)
+            .insert(links)
             .values(Link {
                 id: 1,
                 url: "".into(),
@@ -1415,7 +1423,7 @@ mod tests {
         assert_eq!(rows, 1);
 
         let result = db
-            .insert_into(links)
+            .insert(links)
             .values(Link {
                 id: 2,
                 url: "".into(),
@@ -1428,7 +1436,7 @@ mod tests {
         db.drop(&links_url_ix).await?;
 
         let result = db
-            .insert_into(links)
+            .insert(links)
             .values(Link {
                 id: 2,
                 url: "".into(),
@@ -1489,6 +1497,51 @@ mod tests {
             schema,
             "create table links (id integer not null primary key,url text not null, test text)"
         );
+
+        Ok(())
+    }
+
+    #[allow(unused)]
+    #[tokio::test]
+    async fn null_value_in_where_clause_works() -> Result<(), ryzz::Error> {
+        use ryzz::*;
+
+        #[table]
+        struct Chat {
+            #[ryzz(pk)]
+            id: i64,
+            msg: Option<String>,
+        }
+
+        let db = Database::new(":memory:").await?;
+        let chats = Chat::table(&db).await?;
+
+        let chat = Chat { id: 1, msg: None };
+        let chat2 = Chat {
+            id: 2,
+            msg: Some("".into()),
+        };
+
+        let chat: Chat = db.insert(chats).values(chat)?.returning().await?;
+        let chat2: Chat = db.insert(chats).values(chat2)?.returning().await?;
+
+        let rows: Vec<Chat> = db
+            .select(())
+            .from(chats)
+            .r#where(eq(chats.msg, Value::Null))
+            .all()
+            .await?;
+
+        assert_eq!(rows.len(), 1);
+
+        let rows: Vec<Chat> = db
+            .select(())
+            .from(chats)
+            .r#where(eq(chats.msg, "".to_string()))
+            .all()
+            .await?;
+
+        assert_eq!(rows.len(), 1);
 
         Ok(())
     }

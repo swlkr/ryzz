@@ -42,40 +42,53 @@ let db = Database::new("db.sqlite3").await?;
 let posts = Post::table(&db).await?;
 let comments = Comment::table(&db).await?;
 
+let post = Post {
+    id: 1,
+    title: None,
+    body: "".into()
+};
+
 // insert into posts (id, body) values (?, ?) returning *
-let inserted: Post = db
+let mut post: Post = db
     .insert_into(posts)
-    .values(Post {
-        id: 1,
-        title: None,
-        body: "".into(),
-    })?
+    .values(post)?
     .returning()
     .await?;
 
+post.body = "post".into();
+
 // update posts set body = ?, id = ? where id = ? returning *
-let updated: Post = db
+let post: Post = db
     .update(posts)
-    .set(Post {
-        body: "post".into(),
-        ..inserted
-    })?
+    .set(post)?
     .r#where(eq(posts.id, 1))
     .returning()
     .await?;
 
 // delete from posts where id = ? returning *
-let deleted: Post = db.delete_from(posts).r#where(eq(posts.id, 1)).returning().await?;
+let post: Post = db
+    .delete_from(posts)
+    .r#where(eq(posts.id, 1))
+    .returning()
+    .await?;
 ```
 
 # Querying
 
 ```rust
 // select ... from Comment
-let rows: Vec<Comment> = db.select(()).from(comments).all().await?;
+let rows: Vec<Comment> = db
+    .select(())
+    .from(comments)
+    .all()
+    .await?;
 
 // select ... from Comment
-let rows: Vec<Comment> = db.select((comments.id, comments.body)).from(comments).all().await?;
+let rows: Vec<Comment> = db
+    .select((comments.id, comments.body))
+    .from(comments)
+    .all()
+    .await?;
 ```
 
 # Joins
@@ -99,17 +112,21 @@ let rows = db
 # Prepared Statements
 
 ```rust
-let query = db.select(()).from(comments);
+let query = db
+    .select(())
+    .from(comments);
 
-let prepared = query.prepare::<Comment>();
+let prepped = query.prep::<Comment>();
 
-let rows: Vec<Comment> = prepared.all().await?;
+let rows: Vec<Comment> = prepped.all().await?;
 ```
 
-# Manage Indices
+# Manage Indexes
 
 ```rust
-let ix = index("posts_id_body_ix").unique().on(posts, (posts.id, posts.body));
+let ix = index("posts_id_body_ix")
+    .unique()
+    .on(posts, (posts.id, posts.body));
 
 // create unique index if not exists posts_id_body_ix on posts (id, body);
 db.create(&ix).await?;
