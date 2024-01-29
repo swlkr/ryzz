@@ -173,6 +173,34 @@ pub trait Select {
     fn clause(&self) -> SelectClause;
 }
 
+macro_rules! impl_select {
+    ($max:expr) => {
+        seq_macro::seq!(N in 0..=$max {
+            impl<#(T~N,)*> Select for (#(T~N,)*)
+            where
+                #(T~N: ToColumn,)*
+            {
+                fn columns(&self) -> Vec<&'static str> {
+                    vec![#(self.N.to_column(),)*]
+                }
+
+                fn clause(&self) -> SelectClause {
+                    let tbl = Tbl {
+                        table_name: None,
+                        column_names: self.columns(),
+                    };
+
+                    SelectClause::Sql(format!("select {}", json_object(&tbl, true)))
+                }
+            }
+        });
+    };
+}
+
+seq_macro::seq!(N in 0..16 {
+    impl_select!(N);
+});
+
 impl Select for () {
     fn columns(&self) -> Vec<&'static str> {
         vec![]
@@ -189,25 +217,6 @@ where
 {
     fn columns(&self) -> Vec<&'static str> {
         vec![self.to_column()]
-    }
-
-    fn clause(&self) -> SelectClause {
-        let tbl = Tbl {
-            table_name: None,
-            column_names: self.columns(),
-        };
-
-        SelectClause::Sql(format!("select {}", json_object(&tbl, true)))
-    }
-}
-
-impl<A, B> Select for (A, B)
-where
-    A: ToColumn,
-    B: ToColumn,
-{
-    fn columns(&self) -> Vec<&'static str> {
-        vec![self.0.to_column(), self.1.to_column()]
     }
 
     fn clause(&self) -> SelectClause {
