@@ -12,7 +12,7 @@ pub use tokio_rusqlite;
 
 #[derive(Clone, Debug)]
 pub struct Connection {
-    path: std::rc::Rc<str>,
+    path: Arc<str>,
     open_flags: OpenFlags,
     pragma: Option<String>,
 }
@@ -146,13 +146,13 @@ pub struct TableName {
 
 #[row]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct ColumnName {
+pub struct ColumnName {
     pub name: String,
 }
 
 #[row]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct TableInfoRow {
+pub struct TableInfoRow {
     table_name: TableName,
     column_name: ColumnName,
 }
