@@ -498,14 +498,8 @@ impl Parse for RyzzAttr {
                                 "columns" => {
                                     ryzz_attr.columns = Some(lit_str.clone());
                                 }
-                                "refs" => {
+                                "fk" => {
                                     ryzz_attr.references = Some(lit_str.clone());
-                                }
-                                "from" => {
-                                    ryzz_attr.from = Some(lit_str.clone());
-                                }
-                                "to" => {
-                                    ryzz_attr.to = Some(lit_str.clone());
                                 }
                                 "name" => {
                                     ryzz_attr.name = Some(lit_str.clone());
@@ -598,8 +592,6 @@ struct RyzzAttr {
     default_value: Option<LitStr>,
     columns: Option<LitStr>,
     references: Option<LitStr>,
-    from: Option<LitStr>,
-    to: Option<LitStr>,
     name: Option<LitStr>,
     r#as: Option<LitStr>,
 }

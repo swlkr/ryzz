@@ -1271,7 +1271,7 @@ mod tests {
             #[ryzz(pk)]
             id: i64,
             body: String,
-            #[ryzz(refs = "posts(id)")]
+            #[ryzz(fk = "posts(id)")]
             post_id: i64,
         }
 
