@@ -6,7 +6,7 @@ license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/swlkr/ryzz"
 repository = "https://github.com/swlkr/ryzz"
-keywords = ["ryzz_db_macros"]
+keywords = ["ryzz_macros"]
 description = "Macros for the ryzz crate"
 
 [lib]

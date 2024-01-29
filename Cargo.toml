@@ -2,6 +2,12 @@
 name = "ryzz"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/swlkr/ryzz"
+repository = "https://github.com/swlkr/ryzz"
+keywords = ["drizzle", "orm", "sqlite", "db", "database"]
+description = "A sqlite query builder and automatic schema migrator. Don't call it an orm"
 
 [workspace]
 members = [
