@@ -50,7 +50,7 @@ let post = Post {
 
 // insert into posts (id, body) values (?, ?) returning *
 let mut post: Post = db
-    .insert_into(posts)
+    .insert(posts)
     .values(post)?
     .returning()
     .await?;
