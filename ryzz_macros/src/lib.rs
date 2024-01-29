@@ -1,9 +1,9 @@
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, ToTokens};
 use syn::{
     parse::Parse, parse_macro_input, Attribute, DeriveInput, Error, Expr, ExprAssign, ExprLit,
-    ExprPath, Ident, ItemStruct, Lit, LitStr, PathSegment, Result, Type, TypePath,
+    ExprPath, Field, Ident, ItemStruct, Lit, LitStr, PathSegment, Result, Type, TypePath,
 };
 
 #[proc_macro_attribute]
@@ -49,42 +49,9 @@ pub fn row_derive(s: TokenStream) -> TokenStream {
 }
 
 fn row_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
-    let struct_name = input.ident;
-    let attrs = match input.data {
-        syn::Data::Struct(ref data) => data
-            .fields
-            .iter()
-            .map(|field| {
-                (
-                    field
-                        .ident
-                        .as_ref()
-                        .expect("Struct fields should have names"),
-                    &field.ty,
-                    &field.attrs,
-                )
-            })
-            .collect::<Vec<_>>(),
-        _ => unimplemented!(),
-    };
-    let columns = attrs
-        .iter()
-        .map(|(ident, _, attrs)| {
-            let ryzz_attr = if let Some(attr) = attrs.iter().nth(0) {
-                attr.parse_args::<RyzzAttr>().ok()
-            } else {
-                None
-            };
-
-            match ryzz_attr {
-                Some(attr) => match attr.name {
-                    Some(name) => name.value(),
-                    None => ident.to_string(),
-                },
-                None => ident.to_string(),
-            }
-        })
-        .collect::<Vec<_>>();
+    let struct_name = &input.ident;
+    let fields = ryzz_fields(&input);
+    let columns: Vec<_> = fields?.iter().map(ryzz_field_name).collect();
 
     Ok(quote! {
         impl ryzz::Row for #struct_name {
@@ -283,25 +250,23 @@ pub fn table_derive(s: TokenStream) -> TokenStream {
 }
 
 fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
-    let struct_name = input.ident;
-    let table_str = input
+    let struct_name = &input.ident;
+    let input_attrs: Vec<RyzzAttr> = input
         .attrs
         .iter()
         .filter_map(|attr| attr.parse_args::<RyzzAttr>().ok())
-        .filter_map(|ra| ra.table_name)
-        .last();
-    let table_name = format!(
-        "{}",
-        match table_str {
-            Some(s) => s.value(),
-            None => struct_name.to_string(),
-        }
-    );
-    let table_alias = input
-        .attrs
+        .collect();
+    let table_name = match input_attrs
         .iter()
-        .filter_map(|attr| attr.parse_args::<RyzzAttr>().ok())
-        .filter_map(|ra| ra.r#as)
+        .filter_map(|attr| attr.table_name.as_ref())
+        .last()
+    {
+        Some(s) => s.value(),
+        None => struct_name.to_string(),
+    };
+    let table_alias = input_attrs
+        .iter()
+        .filter_map(|attr| attr.r#as.as_ref())
         .last();
 
     let (table_name, table_alias) = match table_alias {
@@ -309,131 +274,33 @@ fn table_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
         None => (table_name, quote! { None }),
     };
 
-    let attrs = match input.data {
-        syn::Data::Struct(ref data) => data
-            .fields
-            .iter()
-            .map(|field| {
-                (
-                    field
-                        .ident
-                        .as_ref()
-                        .expect("Struct fields should have names"),
-                    &field.ty,
-                    &field.attrs,
-                )
-            })
-            .collect::<Vec<_>>(),
-        _ => unimplemented!(),
-    };
-    let column_fields = attrs.iter().collect::<Vec<_>>();
-    let column_names = attrs
+    let fields = ryzz_fields(&input)?;
+    let column_names: Vec<_> = fields.iter().map(ryzz_field_name).collect();
+    let column_defs = fields.iter().map(column_def).collect::<Vec<_>>();
+    let new_fields = fields
         .iter()
-        .map(|(ident, _, attrs)| {
-            let ryzz_attr = if let Some(attr) = attrs.iter().nth(0) {
-                attr.parse_args::<RyzzAttr>().ok()
-            } else {
-                None
-            };
-
-            match ryzz_attr {
-                Some(attr) => match attr.name {
-                    Some(name) => name.value(),
-                    None => ident.to_string(),
-                },
-                None => ident.to_string(),
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let column_defs = column_fields
-        .iter()
-        .filter_map(|(ident, ty, attrs)| {
-            let ryzz_attr = if let Some(attr) = attrs.iter().nth(0) {
-                attr.parse_args::<RyzzAttr>().ok()
-            } else {
-                None
-            };
-            let name = if let Some(ref attr) = ryzz_attr {
-                if let Some(name) = &attr.name {
-                    name.value()
-                } else {
-                    ident.to_string()
-                }
-            } else {
-                ident.to_string()
-            };
-            let Some(type_col) = type_col(&ty) else {
-                return None;
-            };
-            let mut parts = vec![
-                Some(name),
-                Some(type_col.ident.to_string()),
-                if type_col.null {
-                    None
-                } else {
-                    Some("not null".into())
-                },
-            ];
-            if let Some(ryzz_attr) = ryzz_attr {
-                let primary_key = match ryzz_attr.pk {
-                    true => Some("primary key".into()),
-                    false => None,
-                };
-                let unique = match ryzz_attr.unique {
-                    true => Some("unique".into()),
-                    false => None,
-                };
-                let default_value = match &ryzz_attr.default_value {
-                    Some(s) => Some(format!("default ({})", s.value())),
-                    None => None,
-                };
-                let references = match &ryzz_attr.references {
-                    Some(rf) => Some(format!("references {}", rf.value())),
-                    None => None,
-                };
-                parts.extend(vec![primary_key, unique, default_value, references]);
-            }
-            Some(
-                parts
-                    .into_iter()
-                    .filter_map(|s| s)
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            )
-        })
-        .collect::<Vec<_>>();
-    let column_def_sql = column_defs.join(",");
-    let new_fields = attrs
-        .iter()
-        .map(|(ident, ty, attrs)| {
-            let ryzz_attr = if let Some(attr) = attrs.iter().nth(0) {
-                attr.parse_args::<RyzzAttr>().ok()
-            } else {
-                None
-            };
-
-            let name = match ryzz_attr {
-                Some(attr) => match attr.name {
-                    Some(name) => name.value(),
-                    None => ident.to_string(),
-                },
-                None => ident.to_string(),
-            };
-
+        .map(|f| {
+            let ident = &f.ident;
+            let name = ryzz_field_name(&f);
             let value = format!("{}.{}", table_name, name);
-            Ok(
-                if ty.to_token_stream().to_string().contains("ryzz :: Null <") {
-                    quote! { #ident: ryzz::Null(ryzz::Text(#value)) }
-                } else {
-                    quote! { #ident: #ty(#value) }
+            let ty = &f.ty;
+            let col = type_col(&ty);
+            Ok(match col {
+                Some(c) => match c.null {
+                    true => {
+                        let ty_ident = c.ident;
+                        quote! { #ident: ryzz::Null(ryzz::#ty_ident(#value)) }
+                    }
+                    false => quote! { #ident: #ty(#value) },
                 },
-            )
+                None => quote! { #ident: #ty(#value) },
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     let create_table_sql = format!(
         "create table if not exists {} ({});",
-        table_name, column_def_sql
+        table_name,
+        column_defs.join(",")
     );
     let struct_string = struct_name.to_string();
     Ok(quote! {
@@ -492,11 +359,8 @@ impl Parse for RyzzAttr {
                                 "table" => {
                                     ryzz_attr.table_name = Some(lit_str.clone());
                                 }
-                                "def" => {
+                                "r#default" => {
                                     ryzz_attr.default_value = Some(lit_str.clone());
-                                }
-                                "columns" => {
-                                    ryzz_attr.columns = Some(lit_str.clone());
                                 }
                                 "fk" => {
                                     ryzz_attr.references = Some(lit_str.clone());
@@ -590,8 +454,112 @@ struct RyzzAttr {
     pk: bool,
     unique: bool,
     default_value: Option<LitStr>,
-    columns: Option<LitStr>,
     references: Option<LitStr>,
     name: Option<LitStr>,
     r#as: Option<LitStr>,
+}
+
+struct RyzzField {
+    ident: Ident,
+    ty: Type,
+    attrs: Vec<RyzzAttr>,
+}
+
+fn ryzz_field(field: &Field) -> Result<RyzzField> {
+    let attrs = field.attrs.iter().filter_map(ryzz_attr).collect::<Vec<_>>();
+    match &field.ident {
+        Some(ident) => Ok(RyzzField {
+            ident: ident.clone(),
+            ty: field.ty.clone(),
+            attrs,
+        }),
+        None => Err(Error::new(
+            Span::call_site(),
+            "Only named fields are supported",
+        )),
+    }
+}
+
+fn ryzz_attr(attr: &Attribute) -> Option<RyzzAttr> {
+    attr.parse_args::<RyzzAttr>().ok()
+}
+
+fn ryzz_field_name(field: &RyzzField) -> String {
+    match field
+        .attrs
+        .iter()
+        .filter_map(|attr| attr.name.as_ref())
+        .last()
+    {
+        Some(name) => name.value(),
+        None => field.ident.to_string(),
+    }
+}
+
+fn ryzz_fields(input: &DeriveInput) -> Result<Vec<RyzzField>> {
+    match &input.data {
+        syn::Data::Struct(ds) => ds.fields.iter().map(ryzz_field).collect(),
+        _ => unimplemented!(),
+    }
+}
+
+fn column_def(field: &RyzzField) -> String {
+    let name = ryzz_field_name(&field);
+    let Some(type_col) = type_col(&field.ty) else {
+        return "".into();
+    };
+    vec![
+        Some(name),
+        Some(type_col.ident.to_string()),
+        match type_col.null {
+            true => None,
+            false => Some("not null".into()),
+        },
+        pk(field),
+        unique(field),
+        r#default(field),
+        fk(field),
+    ]
+    .into_iter()
+    .filter_map(|s| s)
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn pk(field: &RyzzField) -> Option<String> {
+    match field.attrs.iter().find(|attr| attr.pk == true) {
+        Some(_) => Some("primary key".into()),
+        None => None,
+    }
+}
+
+fn unique(field: &RyzzField) -> Option<String> {
+    match field.attrs.iter().find(|attr| attr.unique == true) {
+        Some(_) => Some("unique".into()),
+        None => None,
+    }
+}
+
+fn r#default(field: &RyzzField) -> Option<String> {
+    match field
+        .attrs
+        .iter()
+        .filter_map(|attr| attr.default_value.as_ref())
+        .last()
+    {
+        Some(r#default) => Some(format!("default ({})", r#default.value())),
+        None => None,
+    }
+}
+
+fn fk(field: &RyzzField) -> Option<String> {
+    match field
+        .attrs
+        .iter()
+        .filter_map(|attr| attr.references.as_ref())
+        .last()
+    {
+        Some(fk) => Some(format!("references {}", fk.value())),
+        None => None,
+    }
 }
