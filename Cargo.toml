@@ -1,6 +1,6 @@
 [package]
 name = "ryzz"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 readme = "README.md"
@@ -15,7 +15,7 @@ members = [
 ]
 
 [dependencies]
-ryzz_macros = { path = "ryzz_macros", version = "0.1.0" }
+ryzz_macros = { path = "ryzz_macros", version = "0.2.0" }
 rusqlite = { version = "0.29.0", features = ["bundled", "serde_json"] }
 serde = { version = "1.0.188", features = ["derive"] }
 serde_json = { version = "1.0.106" }
