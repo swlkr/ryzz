@@ -547,7 +547,7 @@ fn r#default(field: &RyzzField) -> Option<String> {
         .filter_map(|attr| attr.default_value.as_ref())
         .last()
     {
-        Some(r#default) => Some(format!("default ({})", r#default.value())),
+        Some(r#default) => Some(format!("default {}", r#default.value())),
         None => None,
     }
 }
