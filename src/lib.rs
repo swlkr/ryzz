@@ -133,7 +133,7 @@ pub struct SqliteSchema {
 }
 
 #[table("pragma_table_info(sqlite_schema.name)")]
-#[ryzz(r#as = "pti")]
+#[ryzz(as_ = "pti")]
 pub struct TableInfo {
     pub name: String,
 }
@@ -391,6 +391,7 @@ pub struct Query<'a> {
     group_by: Option<Arc<str>>,
     joins: Option<String>,
     tables: Vec<Tbl<'a>>,
+    default_values: Option<Arc<str>>,
 }
 
 impl<'a> Query<'a> {
@@ -411,6 +412,7 @@ impl<'a> Query<'a> {
             group_by: None,
             joins: None,
             tables: vec![],
+            default_values: None,
             connection,
         }
     }
@@ -572,6 +574,7 @@ impl<'a> Query<'a> {
             select,
             from,
             self.insert_into.clone(),
+            self.default_values.clone(),
             self.values_sql.clone(),
             self.update.clone(),
             self.set.clone(),
@@ -635,6 +638,11 @@ impl<'a> Query<'a> {
             table_name: Some(table.table_name()),
             column_names: table.column_names(),
         });
+        self
+    }
+
+    pub fn default_values(mut self) -> Self {
+        self.default_values = Some("default values".into());
         self
     }
 
@@ -1612,6 +1620,37 @@ mod tests {
             ],
             sql.params
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_works() -> Result<(), ryzz::Error> {
+        use ryzz::*;
+
+        #[table("defaults")]
+        struct Default {
+            #[ryzz(default_ = "'hello'")]
+            im_default: Option<String>,
+        }
+
+        let db = Database::new(":memory:").await?;
+        let defaults = Default::table(&db).await?;
+
+        assert_eq!(
+            "create table defaults (im_default text default 'hello')",
+            db.schema().await?
+        );
+
+        let query = db.insert(defaults).default_values();
+        let sql = query.sql_statement::<Default>();
+
+        assert_eq!(sql.clause, "insert into defaults default values");
+        assert_eq!(sql.params, vec![]);
+
+        let row: Default = query.returning().await?;
+
+        assert_eq!(row.im_default, Some("hello".into()));
 
         Ok(())
     }

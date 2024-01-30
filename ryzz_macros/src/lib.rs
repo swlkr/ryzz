@@ -359,7 +359,7 @@ impl Parse for RyzzAttr {
                                 "table" => {
                                     ryzz_attr.table_name = Some(lit_str.clone());
                                 }
-                                "r#default" => {
+                                "r#default" | "default_" => {
                                     ryzz_attr.default_value = Some(lit_str.clone());
                                 }
                                 "fk" => {
@@ -368,7 +368,7 @@ impl Parse for RyzzAttr {
                                 "name" => {
                                     ryzz_attr.name = Some(lit_str.clone());
                                 }
-                                "r#as" => {
+                                "r#as" | "as_" => {
                                     ryzz_attr.r#as = Some(lit_str.clone());
                                 }
                                 _ => {}
