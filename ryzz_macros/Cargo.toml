@@ -3,7 +3,6 @@ name = "ryzz_macros"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-readme = "README.md"
 homepage = "https://github.com/swlkr/ryzz"
 repository = "https://github.com/swlkr/ryzz"
 keywords = ["ryzz_macros"]
