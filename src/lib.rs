@@ -1046,7 +1046,22 @@ pub fn like(left: impl ToColumn, right: impl ToValueColumn) -> Sql {
     }
 }
 
+#[deprecated(since = "0.1.0", note = "please use `in_` instead")]
 pub fn r#in(left: impl ToColumn, right: Vec<impl ToValueColumn>) -> Sql {
+    Sql {
+        clause: format!(
+            "{} in ({})",
+            left.to_column(),
+            right.iter().map(|_| "?").collect::<Vec<&str>>().join(",")
+        ),
+        params: right
+            .into_iter()
+            .filter_map(|val| val.to_value())
+            .collect::<Vec<Value>>(),
+    }
+}
+
+pub fn in_(left: impl ToColumn, right: Vec<impl ToValueColumn>) -> Sql {
     Sql {
         clause: format!(
             "{} in ({})",
