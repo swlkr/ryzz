@@ -1298,7 +1298,7 @@ mod tests {
         let post: Post = db
             .update(posts)
             .set(post)?
-            .r#where(eq(posts.id, 1))
+            .r#where(and(eq(posts.id, 1), eq(posts.title, Value::Null)))
             .returning()
             .await?;
 
