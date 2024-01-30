@@ -447,7 +447,16 @@ impl<'a> Query<'a> {
         self
     }
 
+    #[deprecated(since = "0.1.0", note = "please use `where_` instead")]
     pub fn r#where(mut self, sql: Sql) -> Self {
+        if let None = self.r#where {
+            self.r#where = Some(format!("where {}", sql.clause).into())
+        }
+        self.values.extend(sql.params);
+        self
+    }
+
+    pub fn where_(mut self, sql: Sql) -> Self {
         if let None = self.r#where {
             self.r#where = Some(format!("where {}", sql.clause).into())
         }
@@ -1298,7 +1307,7 @@ mod tests {
         let post: Post = db
             .update(posts)
             .set(post)?
-            .r#where(and(eq(posts.id, 1), eq(posts.title, Value::Null)))
+            .where_(and(eq(posts.id, 1), eq(posts.title, Value::Null)))
             .returning()
             .await?;
 
@@ -1308,7 +1317,7 @@ mod tests {
         // delete from posts where id = ? returning *
         let post: Post = db
             .delete_from(posts)
-            .r#where(eq(posts.id, 1))
+            .where_(eq(posts.id, 1))
             .returning()
             .await?;
 
@@ -1354,7 +1363,7 @@ mod tests {
         let query = db
             .select((comments.id, comments.body))
             .from(comments)
-            .r#where(eq(comments.id, 1))
+            .where_(eq(comments.id, 1))
             .limit(1);
 
         let rows: Vec<Comment> = query.all().await?;
@@ -1537,7 +1546,7 @@ mod tests {
         let rows: Vec<Chat> = db
             .select(())
             .from(chats)
-            .r#where(eq(chats.msg, Value::Null))
+            .where_(eq(chats.msg, Value::Null))
             .all()
             .await?;
 
@@ -1546,11 +1555,48 @@ mod tests {
         let rows: Vec<Chat> = db
             .select(())
             .from(chats)
-            .r#where(eq(chats.msg, "".to_string()))
+            .where_(eq(chats.msg, "".to_string()))
             .all()
             .await?;
 
         assert_eq!(rows.len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn more_complicated_where_clause_works() -> Result<(), ryzz::Error> {
+        use ryzz::*;
+
+        #[table]
+        struct Glyph {
+            image: String,
+            aspect: i64,
+        }
+
+        let db = Database::new(":memory:").await?;
+        let glyphs = Glyph::table(&db).await?;
+
+        let query = db
+            .select(glyphs.image)
+            .from(glyphs)
+            .where_(or(in_(glyphs.aspect, vec![1, 2]), like(glyphs.image, "A%")));
+
+        let sql = query.sql_statement::<Glyph>();
+
+        assert_eq!(
+            "select json_object('image', Glyph.image)  from Glyph where (Glyph.aspect in (?,?) or Glyph.image like ?)",
+            sql.clause
+        );
+
+        assert_eq!(
+            vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Text("A%".into())
+            ],
+            sql.params
+        );
 
         Ok(())
     }

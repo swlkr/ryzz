@@ -61,14 +61,14 @@ post.body = "post".into();
 let post: Post = db
     .update(posts)
     .set(post)?
-    .r#where(and(eq(posts.id, 1), eq(posts.title, Value::Null)))
+    .where_(and(eq(posts.id, 1), eq(posts.title, Value::Null)))
     .returning()
     .await?;
 
 // delete from posts where id = ? returning *
 let post: Post = db
     .delete_from(posts)
-    .r#where(eq(posts.id, 1))
+    .where_(eq(posts.id, 1))
     .returning()
     .await?;
 ```
