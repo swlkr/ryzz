@@ -1,6 +1,7 @@
 //! Ryzz is a query builder and migration generator for sqlite, don't call it an orm.
 //!
 extern crate self as ryzz;
+pub use rusqlite;
 pub use rusqlite::types::Value;
 pub use rusqlite::ToSql;
 use rusqlite::{params_from_iter, OpenFlags};
