@@ -51,7 +51,7 @@ let post = Post {
 // insert into posts (id, body) values (?, ?) returning *
 let mut post: Post = db
     .insert(posts)
-    .values(post)?
+    .values(post)
     .returning()
     .await?;
 
@@ -60,7 +60,7 @@ post.body = "post".into();
 // update posts set body = ?, id = ? where id = ? returning *
 let post: Post = db
     .update(posts)
-    .set(post)?
+    .set(post)
     .where_(and(eq(posts.id, 1), eq(posts.title, Value::Null)))
     .returning()
     .await?;

@@ -386,13 +386,17 @@ pub struct Query<'a> {
     delete: Option<Arc<str>>,
     values_sql: Option<Arc<str>>,
     returning: Option<Arc<str>>,
-    values: Vec<Value>,
     update: Option<Arc<str>>,
     order: Option<Arc<str>>,
     group_by: Option<Arc<str>>,
     joins: Option<String>,
     tables: Vec<Tbl<'a>>,
     default_values: Option<Arc<str>>,
+    insert_named_params: Option<Result<NamedParamSlice, Error>>,
+    insert_values: Vec<Value>,
+    update_named_params: Option<Result<NamedParamSlice, Error>>,
+    update_values: Vec<Value>,
+    where_values: Vec<Value>,
 }
 
 impl<'a> Query<'a> {
@@ -404,7 +408,6 @@ impl<'a> Query<'a> {
             limit: None,
             insert_into: None,
             values_sql: None,
-            values: vec![],
             delete: None,
             set: None,
             update: None,
@@ -414,6 +417,11 @@ impl<'a> Query<'a> {
             joins: None,
             tables: vec![],
             default_values: None,
+            insert_named_params: None,
+            insert_values: vec![],
+            update_named_params: None,
+            update_values: vec![],
+            where_values: vec![],
             connection,
         }
     }
@@ -455,7 +463,7 @@ impl<'a> Query<'a> {
         if let None = self.r#where {
             self.r#where = Some(format!("where {}", sql.clause).into())
         }
-        self.values.extend(sql.params);
+        self.where_values.extend(sql.params);
         self
     }
 
@@ -463,7 +471,7 @@ impl<'a> Query<'a> {
         if let None = self.r#where {
             self.r#where = Some(format!("where {}", sql.clause).into())
         }
-        self.values.extend(sql.params);
+        self.where_values = sql.params;
         self
     }
 
@@ -519,10 +527,101 @@ impl<'a> Query<'a> {
         self
     }
 
-    fn sql_statement<T: Row>(&self) -> Sql {
-        Sql {
+    fn sql_statement<T: Row>(&mut self) -> Result<Sql, Error> {
+        self.set_insert_values()?;
+        self.set_update_values()?;
+        let mut params = vec![];
+        params.extend(self.insert_values.clone());
+        params.extend(self.update_values.clone());
+        params.extend(self.where_values.clone());
+
+        Ok(Sql {
             clause: self.sql::<T>(),
-            params: self.values.clone(),
+            params,
+        })
+    }
+
+    fn set_insert_values(&mut self) -> Result<(), Error> {
+        match self.insert_named_params {
+            Some(ref named_params) => {
+                match named_params {
+                    Ok(named_params) => {
+                        let column_names = named_params
+                            .iter()
+                            .map(|(name, _)| name.replacen(":", "", 1).to_string())
+                            .collect::<Vec<_>>();
+                        let placeholders = named_params
+                            .iter()
+                            .map(|_| "?")
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let values: Result<Vec<_>, Error> = named_params
+                            .iter()
+                            .map(|(_, to_sql)| {
+                                Ok(match to_sql.to_sql()? {
+                                    rusqlite::types::ToSqlOutput::Borrowed(value_ref) => {
+                                        value_ref.into()
+                                    }
+                                    rusqlite::types::ToSqlOutput::Owned(value) => value,
+                                    _ => unimplemented!(),
+                                })
+                            })
+                            .collect();
+
+                        self.insert_into =
+                    match &self.insert_into {
+                        Some(sql) => Some(format!("{} ({})", sql, column_names.join(",")).into()),
+                        None => return Err(Error::Sql(
+                            "no table name found when calling values. Try calling insert() first"
+                                .into(),
+                        )),
+                    };
+
+                        self.insert_values = values?;
+                        self.values_sql = Some(format!("values ({})", placeholders).into());
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn set_update_values(&mut self) -> Result<(), Error> {
+        match self.update_named_params {
+            Some(ref named_params) => match named_params {
+                Ok(named_params) => {
+                    let column_names = named_params
+                        .iter()
+                        .map(|(name, _)| name.to_string())
+                        .collect::<Vec<_>>();
+                    let set = column_names
+                        .iter()
+                        .map(|name| format!("{} = ?", name.replacen(":", "", 1)))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    self.set = Some(format!("set {}", set).into());
+                    let values: Result<Vec<_>, Error> = named_params
+                        .iter()
+                        .map(|(_, to_sql)| {
+                            Ok(match to_sql.to_sql()? {
+                                rusqlite::types::ToSqlOutput::Borrowed(value_ref) => {
+                                    value_ref.into()
+                                }
+                                rusqlite::types::ToSqlOutput::Owned(value) => value,
+                                _ => unimplemented!(),
+                            })
+                        })
+                        .collect();
+                    self.update_values = values?;
+
+                    Ok(())
+                }
+                Err(err) => return Err(err.into()),
+            },
+            None => Ok(()),
         }
     }
 
@@ -595,19 +694,19 @@ impl<'a> Query<'a> {
         .into()
     }
 
-    pub async fn all<T>(self) -> Result<Vec<T>, Error>
+    pub async fn all<T>(mut self) -> Result<Vec<T>, Error>
     where
         T: Row + DeserializeOwned + Send + Sync + 'static,
     {
-        let rows = rows(&self.connection, self.sql_statement::<T>()).await?;
+        let rows = rows(&self.connection, self.sql_statement::<T>()?).await?;
         Ok(rows)
     }
 
-    pub async fn first<T>(&self) -> Result<T, Error>
+    pub async fn first<T>(mut self) -> Result<T, Error>
     where
         T: Row + DeserializeOwned + Send + Sync + 'static,
     {
-        let row = rows::<T>(&self.connection, self.sql_statement::<T>())
+        let row = rows::<T>(&self.connection, self.sql_statement::<T>()?)
             .await?
             .into_iter()
             .nth(0)
@@ -618,13 +717,14 @@ impl<'a> Query<'a> {
     pub async fn prep<T: Row + DeserializeOwned + Send + Sync + 'static>(
         self,
     ) -> Result<Self, Error> {
-        let sql = self.sql_statement::<T>();
+        let clause = self.sql::<T>();
+
         self.connection
             .call(move |conn| {
                 // this uses an internal Lru cache within rusqlite
                 // and uses the sql as the key to the cache
                 // not ideal but what can you do?
-                let _ = conn.prepare_cached(&sql.clause)?;
+                let _ = conn.prepare_cached(&clause)?;
 
                 Ok(())
             })
@@ -651,42 +751,9 @@ impl<'a> Query<'a> {
         Ok(serde_rusqlite::to_params_named(row)?)
     }
 
-    pub fn values(mut self, row: impl Serialize) -> Result<Self, Error> {
-        let named_params = Self::row_to_named_params(row)?;
-
-        let column_names = named_params
-            .iter()
-            .map(|(name, _)| name.replacen(":", "", 1).to_string())
-            .collect::<Vec<_>>();
-        let placeholders = named_params
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
-        let values: Result<Vec<_>, Error> = named_params
-            .iter()
-            .map(|(_, to_sql)| {
-                Ok(match to_sql.to_sql()? {
-                    rusqlite::types::ToSqlOutput::Borrowed(value_ref) => value_ref.into(),
-                    rusqlite::types::ToSqlOutput::Owned(value) => value,
-                    _ => unimplemented!(),
-                })
-            })
-            .collect();
-
-        self.insert_into = match &self.insert_into {
-            Some(sql) => Some(format!("{} ({})", sql, column_names.join(",")).into()),
-            None => {
-                return Err(Error::Sql(
-                    "no table name found when calling values. Try calling insert() first".into(),
-                ))
-            }
-        };
-
-        self.values = values?;
-        self.values_sql = Some(format!("values ({})", placeholders).into());
-
-        Ok(self)
+    pub fn values(mut self, row: impl Serialize) -> Self {
+        self.insert_named_params = Some(Self::row_to_named_params(row));
+        self
     }
 
     pub fn update(mut self, table: impl Table) -> Self {
@@ -698,32 +765,9 @@ impl<'a> Query<'a> {
         self
     }
 
-    pub fn set(mut self, row: impl Serialize) -> Result<Self, Error> {
-        let named_params = Self::row_to_named_params(row)?;
-
-        let column_names = named_params
-            .iter()
-            .map(|(name, _)| name.to_string())
-            .collect::<Vec<_>>();
-        let set = column_names
-            .iter()
-            .map(|name| format!("{} = ?", name.replacen(":", "", 1)))
-            .collect::<Vec<_>>()
-            .join(",");
-        self.set = Some(format!("set {}", set).into());
-        let values: Result<Vec<_>, Error> = named_params
-            .iter()
-            .map(|(_, to_sql)| {
-                Ok(match to_sql.to_sql()? {
-                    rusqlite::types::ToSqlOutput::Borrowed(value_ref) => value_ref.into(),
-                    rusqlite::types::ToSqlOutput::Owned(value) => value,
-                    _ => unimplemented!(),
-                })
-            })
-            .collect();
-        self.values = values?;
-
-        Ok(self)
+    pub fn set(mut self, row: impl Serialize) -> Self {
+        self.update_named_params = Some(Self::row_to_named_params(row));
+        self
     }
 
     pub fn delete(mut self, table: impl Table) -> Self {
@@ -746,19 +790,23 @@ impl<'a> Query<'a> {
             .join(",");
         self.returning = Some(format!("returning {}", tables).into());
 
-        let rows = rows::<T>(&self.connection, self.sql_statement::<T>()).await?;
+        let conn = self.connection.clone();
+        let sql = self.sql_statement::<T>()?;
+        let rows = rows::<T>(&conn, sql.clone()).await?;
         if let Some(row) = rows.into_iter().nth(0) {
             Ok(row)
         } else {
             Err(Error::InsertError(format!(
-                "failed to insert {}",
-                self.sql_statement::<T>().clause
+                "failed to execute {}",
+                sql.clause
             )))
         }
     }
 
-    pub async fn rows_affected(&self) -> Result<usize, Error> {
-        let rows_affected = execute(&self.connection, self.sql_statement::<usize>()).await?;
+    pub async fn rows_affected(mut self) -> Result<usize, Error> {
+        let conn = self.connection.clone();
+        let sql = self.sql_statement::<usize>()?;
+        let rows_affected = execute(&conn, sql).await?;
         Ok(rows_affected)
     }
 }
@@ -1131,7 +1179,13 @@ pub enum Error {
     Serialize(#[from] serde_rusqlite::Error),
 }
 
-#[derive(Debug)]
+impl From<&Error> for Error {
+    fn from(value: &Error) -> Self {
+        value.into()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Sql {
     pub clause: String,
     pub params: Vec<Value>,
@@ -1319,7 +1373,7 @@ mod tests {
         };
 
         // insert into posts (id, body) values (?, ?) returning *
-        let mut post: Post = db.insert(posts).values(post)?.returning().await?;
+        let mut post: Post = db.insert(posts).values(post).returning().await?;
 
         assert_eq!(post.id, 1);
         assert_eq!(post.body, "");
@@ -1330,7 +1384,7 @@ mod tests {
         // update posts set body = ?, id = ? where id = ? returning *
         let post: Post = db
             .update(posts)
-            .set(post)?
+            .set(post)
             .where_(and(eq(posts.id, 1), eq(posts.title, Value::Null)))
             .returning()
             .await?;
@@ -1358,7 +1412,7 @@ mod tests {
                 title: None,
                 id: 1,
                 body: "".into(),
-            })?
+            })
             .returning()
             .await?;
 
@@ -1372,7 +1426,7 @@ mod tests {
 
         let comment: Comment = db
             .insert(comments)
-            .values(new_comment.clone())?
+            .values(new_comment.clone())
             .returning()
             .await?;
 
@@ -1458,7 +1512,7 @@ mod tests {
             .values(Link {
                 id: 1,
                 url: "".into(),
-            })?
+            })
             .rows_affected()
             .await?;
 
@@ -1469,7 +1523,7 @@ mod tests {
             .values(Link {
                 id: 2,
                 url: "".into(),
-            })?
+            })
             .rows_affected()
             .await;
 
@@ -1482,7 +1536,7 @@ mod tests {
             .values(Link {
                 id: 2,
                 url: "".into(),
-            })?
+            })
             .rows_affected()
             .await;
 
@@ -1564,8 +1618,8 @@ mod tests {
             msg: Some("".into()),
         };
 
-        let chat: Chat = db.insert(chats).values(chat)?.returning().await?;
-        let chat2: Chat = db.insert(chats).values(chat2)?.returning().await?;
+        let chat: Chat = db.insert(chats).values(chat).returning().await?;
+        let chat2: Chat = db.insert(chats).values(chat2).returning().await?;
 
         let rows: Vec<Chat> = db
             .select(())
@@ -1601,12 +1655,12 @@ mod tests {
         let db = Database::new(":memory:").await?;
         let glyphs = Glyph::table(&db).await?;
 
-        let query = db
+        let mut query = db
             .select(glyphs.image)
             .from(glyphs)
             .where_(or(in_(glyphs.aspect, vec![1, 2]), like(glyphs.image, "A%")));
 
-        let sql = query.sql_statement::<Glyph>();
+        let sql = query.sql_statement::<Glyph>()?;
 
         assert_eq!(
             "select json_object('image', Glyph.image)  from Glyph where (Glyph.aspect in (?,?) or Glyph.image like ?)",
@@ -1643,8 +1697,8 @@ mod tests {
             db.schema().await?
         );
 
-        let query = db.insert(defaults).default_values();
-        let sql = query.sql_statement::<Default>();
+        let mut query = db.insert(defaults).default_values();
+        let sql = query.sql_statement::<Default>()?;
 
         assert_eq!(sql.clause, "insert into defaults default values");
         assert_eq!(sql.params, vec![]);
