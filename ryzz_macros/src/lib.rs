@@ -50,13 +50,47 @@ pub fn row_derive(s: TokenStream) -> TokenStream {
 
 fn row_derive_macro(input: DeriveInput) -> Result<TokenStream2> {
     let struct_name = &input.ident;
-    let fields = ryzz_fields(&input);
-    let columns: Vec<_> = fields?.iter().map(ryzz_field_name).collect();
+    let fields = ryzz_fields(&input)?;
+    let columns: Vec<_> = fields.iter().map(ryzz_field_name).collect();
+    let (pk_column, pk) = fields
+        .into_iter()
+        .filter_map(|RyzzField { ident, attrs, .. }| {
+            if let Some(_) = attrs.iter().find(|attr| attr.pk) {
+                let name = ident.to_string();
+                Some((quote! { Some(#name) }, quote! { Some(self.#ident.into()) }))
+            } else {
+                None
+            }
+        })
+        .last()
+        .unwrap_or((quote! { None }, quote! { None }));
+    let table_name = match input
+        .attrs
+        .iter()
+        .filter_map(ryzz_attr)
+        .filter_map(|attr| attr.table_name)
+        .last()
+    {
+        Some(s) => s.value(),
+        None => struct_name.to_string(),
+    };
 
     Ok(quote! {
         impl ryzz::Row for #struct_name {
             fn column_names() -> Vec<&'static str> {
                 vec![#(#columns,)*]
+            }
+
+            fn pk_column() -> Option<&'static str> {
+                #pk_column
+            }
+
+            fn pk(&self) -> Option<Value> {
+                #pk
+            }
+
+            fn table_name() -> &'static str {
+                #table_name
             }
         }
     })
@@ -85,7 +119,7 @@ pub fn table(args: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 // this creates a table struct and derives row on the given struct
-fn table_macro(args: Args, mut row_struct: ItemStruct) -> Result<TokenStream2> {
+fn table_macro(args: Args, row_struct: ItemStruct) -> Result<TokenStream2> {
     let Args { name } = args;
     let row_ident = &row_struct.ident;
     let name = if let Some(name) = name {
@@ -93,7 +127,6 @@ fn table_macro(args: Args, mut row_struct: ItemStruct) -> Result<TokenStream2> {
     } else {
         LitStr::new(&row_ident.to_string(), row_ident.span())
     };
-    let row_attrs = row_struct.attrs;
     let table_struct_name = format!("{}Table", row_ident);
     let table_struct_ident = Ident::new(&table_struct_name, row_ident.span());
     let table_fields = row_struct
@@ -142,39 +175,18 @@ fn table_macro(args: Args, mut row_struct: ItemStruct) -> Result<TokenStream2> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let table_alias = match row_attrs
+    let table_alias = match &row_struct
+        .attrs
         .iter()
-        .filter_map(|attr| attr.parse_args::<RyzzAttr>().ok())
+        .filter_map(ryzz_attr)
         .find(|attr| attr.r#as.is_some())
     {
         Some(RyzzAttr { r#as, .. }) => quote! { #[ryzz(r#as = #r#as)] },
         None => quote! {},
     };
 
-    // strip ryzz attrs from row_struct itself
-    row_struct.attrs = row_attrs
-        .iter()
-        .filter_map(|attr| match attr.parse_args::<RyzzAttr>() {
-            Ok(_) => None,
-            Err(_) => Some(attr.clone()),
-        })
-        .collect::<Vec<_>>();
-
-    // strip ryzz attrs from row_struct fields
-    for field in &mut row_struct.fields {
-        field.attrs = field
-            .attrs
-            .iter()
-            .filter_map(|x| match x.parse_args::<RyzzAttr>() {
-                Ok(_) => None,
-                Err(_) => Some(x.clone()),
-            })
-            .collect::<Vec<_>>();
-    }
-
     Ok(quote! {
         #[row]
-        #(#row_attrs)*
         #row_struct
 
         #[derive(ryzz::Table, Clone, Copy, Debug, Default)]

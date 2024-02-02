@@ -735,6 +735,26 @@ impl<'a> Query<'a> {
         self
     }
 
+    async fn delete_row<T: Row + Serialize + DeserializeOwned + Send + Sync + 'static>(
+        mut self,
+        row: T,
+    ) -> Result<T, Error> {
+        self.delete = Some(format!("delete from {}", T::table_name()).into());
+        self.tables.push(Tbl {
+            table_name: Some(T::table_name()),
+            column_names: T::column_names(),
+        });
+        self = self.where_(Sql {
+            clause: format!(
+                "{} = ?",
+                T::pk_column().ok_or(Error::MissingPrimaryKey(T::table_name().into()))?
+            ),
+            params: vec![row.pk().into()],
+        });
+
+        self.returning::<T>().await
+    }
+
     pub async fn returning<T: Row + Serialize + DeserializeOwned + Send + Sync + 'static>(
         mut self,
     ) -> Result<T, Error> {
@@ -766,6 +786,18 @@ impl<'a> Query<'a> {
 impl Row for usize {
     fn column_names() -> Vec<&'static str> {
         vec![]
+    }
+
+    fn pk(&self) -> Option<Value> {
+        None
+    }
+
+    fn pk_column() -> Option<&'static str> {
+        None
+    }
+
+    fn table_name() -> &'static str {
+        ""
     }
 }
 
@@ -1101,6 +1133,9 @@ where
     Self: DeserializeOwned + Send + Sync,
 {
     fn column_names() -> Vec<&'static str>;
+    fn pk(&self) -> Option<Value>;
+    fn pk_column() -> Option<&'static str>;
+    fn table_name() -> &'static str;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1129,6 +1164,8 @@ pub enum Error {
     Deserialize(#[from] serde_json::Error),
     #[error("serialize error: {0}")]
     Serialize(#[from] serde_rusqlite::Error),
+    #[error("missing pk column in table: {0}")]
+    MissingPrimaryKey(String),
 }
 
 #[derive(Debug)]
@@ -1281,6 +1318,13 @@ impl Database {
             .map(|row| row.sql.to_lowercase())
             .collect::<Vec<_>>()
             .join("\n"))
+    }
+
+    pub async fn delete<T: Row + Serialize + DeserializeOwned + Send + Sync + 'static>(
+        &self,
+        row: T,
+    ) -> Result<T, Error> {
+        Query::new(&self.connection).delete_row(row).await
     }
 }
 
@@ -1652,6 +1696,38 @@ mod tests {
         let row: Default = query.returning().await?;
 
         assert_eq!(row.im_default, Some("hello".into()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_works() -> Result<(), ryzz::Error> {
+        use ryzz::*;
+
+        #[table]
+        struct User {
+            #[ryzz(pk)]
+            id: i64,
+        }
+
+        let db = Database::new(":memory:").await?;
+        let users = User::table(&db).await?;
+
+        let user = User { id: 1 };
+        let user: User = db.insert(users).values(user)?.returning().await?;
+        assert_eq!(user.id, 1);
+
+        let user = db.delete(user).await?;
+        assert_eq!(user.id, 1);
+
+        let rows: Vec<User> = db
+            .select(())
+            .from(users)
+            .where_(eq(users.id, 1))
+            .all()
+            .await?;
+
+        assert_eq!(rows.len(), 0);
 
         Ok(())
     }

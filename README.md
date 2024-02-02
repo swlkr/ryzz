@@ -73,6 +73,31 @@ let post: Post = db
     .await?;
 ```
 
+# Upsert and easier delete
+
+```rust
+let post = Post {
+    id: 1,
+    title: None,
+    body: "".into()
+};
+
+// insert into posts (id, body)
+// values (?, ?)
+// on conflict(id)
+// do update set body = ?
+// returning *
+let mut post: Post = db.save(post).await?;
+
+post.body = "post".into();
+
+// upsert again
+let post: Post = db.save(post).await?;
+
+// delete from post where id = ? returning *
+let post: Post = db.delete(post).await?;
+```
+
 # Querying
 
 ```rust
