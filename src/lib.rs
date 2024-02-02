@@ -781,6 +781,58 @@ impl<'a> Query<'a> {
         let rows_affected = execute(&self.connection, self.sql_statement::<usize>()).await?;
         Ok(rows_affected)
     }
+
+    async fn save<T: Row + Serialize + DeserializeOwned + Send + Sync + 'static>(
+        mut self,
+        row: T,
+    ) -> Result<T, Error> {
+        self.insert_into = Some(format!("insert into {}", T::table_name()).into());
+        self.tables.push(Tbl {
+            table_name: Some(T::table_name()),
+            column_names: T::column_names(),
+        });
+        let named_params = Self::row_to_named_params(row)?;
+        let column_names = named_params
+            .iter()
+            .map(|(name, _)| name.replacen(":", "", 1).to_string())
+            .collect::<Vec<_>>();
+        let placeholders = named_params
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let values: Result<Vec<_>, Error> = named_params
+            .iter()
+            .map(|(_, to_sql)| {
+                Ok(match to_sql.to_sql()? {
+                    rusqlite::types::ToSqlOutput::Borrowed(value_ref) => value_ref.into(),
+                    rusqlite::types::ToSqlOutput::Owned(value) => value,
+                    _ => unimplemented!(),
+                })
+            })
+            .collect();
+
+        self.insert_into = match &self.insert_into {
+            Some(sql) => Some(format!("{} ({})", sql, column_names.join(",")).into()),
+            None => {
+                return Err(Error::Sql(
+                    "no table name found when calling values. Try calling insert() first".into(),
+                ))
+            }
+        };
+
+        self.values = values?.clone();
+        self.values_sql = Some(format!("values ({})", placeholders).into());
+        let set = column_names
+            .iter()
+            .map(|name| format!("{} = ?", name.replacen(":", "", 1)))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.set = Some(format!("on conflict do update set {}", set).into());
+        self.values.extend(self.values.clone());
+
+        self.returning::<T>().await
+    }
 }
 
 impl Row for usize {
@@ -1326,6 +1378,13 @@ impl Database {
     ) -> Result<T, Error> {
         Query::new(&self.connection).delete_row(row).await
     }
+
+    pub async fn save<T: Row + Serialize + DeserializeOwned + Send + Sync + 'static>(
+        &self,
+        row: T,
+    ) -> Result<T, Error> {
+        Query::new(&self.connection).save(row).await
+    }
 }
 
 #[cfg(test)]
@@ -1728,6 +1787,35 @@ mod tests {
             .await?;
 
         assert_eq!(rows.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn save_works() -> Result<(), ryzz::Error> {
+        use ryzz::*;
+
+        #[table]
+        struct User {
+            #[ryzz(pk)]
+            id: i64,
+        }
+
+        let db = Database::new(":memory:").await?;
+        let users = User::table(&db).await?;
+
+        let user = User { id: 1 };
+        let user: User = db.save(user).await?;
+        assert_eq!(user.id, 1);
+
+        let rows: Vec<User> = db
+            .select(())
+            .from(users)
+            .where_(eq(users.id, 1))
+            .all()
+            .await?;
+
+        assert_eq!(rows.len(), 1);
 
         Ok(())
     }
