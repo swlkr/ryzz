@@ -774,7 +774,7 @@ pub fn placeholder() -> &'static str {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Null<T: ToColumn>(T);
+pub struct Null<T: ToColumn>(pub T);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Text(pub &'static str);
