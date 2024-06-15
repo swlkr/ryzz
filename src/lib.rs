@@ -1196,6 +1196,12 @@ pub struct Database {
     pub connection: tokio_rusqlite::Connection,
 }
 
+impl From<tokio_rusqlite::Connection> for Database {
+    fn from(connection: tokio_rusqlite::Connection) -> Self {
+        Self { connection }
+    }
+}
+
 impl Database {
     pub async fn new(path: &str) -> Result<Self, Error> {
         Ok(Self {
